@@ -18,7 +18,10 @@ OWNER_ID = int(os.environ.get("OWNER_ID"))
 
 # --- CHANNEL ROUTING ---
 # Maps source channel IDs → destination channel ID
-# Username-based sources are resolved at startup
+# Username-based sources are resolved at startup and added to this dict
+# NOTE: Event handlers below do NOT filter on chats= at registration time.
+# They look up CHANNEL_MAP live on every incoming event, so it's safe for
+# resolve_new_channels() to populate this dict after handlers are registered.
 CHANNEL_MAP = {
     -1001785197109: -1003891219488,  # AnabelSignals → BREY TRADING FX VIP
     -1001284268486: -1003891219488,  # EasyForexPips → BREY TRADING FX VIP
@@ -252,7 +255,12 @@ bot_client = TelegramClient(StringSession(), API_ID, API_HASH)
 # STARTUP: Resolve new channel usernames → IDs
 # -------------------------------------------------------------------
 async def resolve_new_channels():
-    """Resolve username-based source channels and add to CHANNEL_MAP."""
+    """Resolve username-based source channels and add to CHANNEL_MAP.
+
+    Handlers below check CHANNEL_MAP live on every event (no chats= filter
+    at registration time), so it's safe to mutate this dict here, after
+    handlers are already registered.
+    """
     resolved = []
     failed = []
     for username in NEW_SOURCE_USERNAMES:
@@ -738,9 +746,6 @@ async def command_menu(event):
             await event.respond("✅ Ninguna bloqueada.")
 
     elif command == "/channels":
-        source_list = "\n".join(
-            [f"• ID `{src_id}`" for src_id in CHANNEL_MAP.keys()]
-        )
         await event.respond(
             "📡 **Canales Fuente:**\n\n"
             "• @Goldsignalz\\_fx\n"
@@ -853,7 +858,9 @@ async def button_handler(event):
 # -------------------------------------------------------------------
 # ALBUM HANDLER (multiple photos sent together)
 # -------------------------------------------------------------------
-@user_client.on(events.Album(chats=list(CHANNEL_MAP.keys())))
+# NOTE: no chats= filter here — CHANNEL_MAP is checked live inside the
+# handler so newly-resolved username channels work without a restart.
+@user_client.on(events.Album())
 async def album_handler(event):
     if SETTINGS["paused"]:
         return
@@ -919,7 +926,8 @@ async def album_handler(event):
 # -------------------------------------------------------------------
 # SINGLE MESSAGE HANDLER
 # -------------------------------------------------------------------
-@user_client.on(events.NewMessage(chats=list(CHANNEL_MAP.keys())))
+# NOTE: no chats= filter here either, for the same reason as above.
+@user_client.on(events.NewMessage())
 async def replication_engine(event):
     if SETTINGS["paused"]:
         return
@@ -989,11 +997,19 @@ async def replication_engine(event):
     final_text = process_message(raw_text) if raw_text else None
 
     try:
-        await user_client.send_message(
-            destination_id,
-            final_text,
-            file=event.message.media if is_photo else None
-        )
+        if is_photo:
+            # send_file is more reliable than send_message(file=...) for
+            # media + caption together.
+            await user_client.send_file(
+                destination_id,
+                event.message.media,
+                caption=final_text
+            )
+        else:
+            await user_client.send_message(
+                destination_id,
+                final_text
+            )
         print(f"✅ Gold signal: {source_id} → {destination_id}")
     except Exception as delivery_error:
         print(f"❌ Delivery failed: {delivery_error}")
@@ -1009,11 +1025,11 @@ async def main():
         return
     print("✅ Userbot (scraper) connected.")
 
-    # Resolve new channel usernames to IDs
+    # Resolve new channel usernames to IDs.
+    # Handlers are already registered at this point (decorators ran at
+    # import time), but since they check CHANNEL_MAP live instead of
+    # filtering on chats= at registration, this works correctly.
     await resolve_new_channels()
-
-    # Re-register handlers with updated channel list
-    # (Handlers already use CHANNEL_MAP which is now populated)
 
     await bot_client.start(bot_token=BOT_TOKEN)
     print("✅ Bot control panel connected.")
@@ -1030,3 +1046,4 @@ async def main():
 
 
 asyncio.run(main())
+
