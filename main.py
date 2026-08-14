@@ -12,13 +12,13 @@ from deep_translator import GoogleTranslator
 # --- ENVIRONMENT CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
-SESSION_STRING = os.environ.get("SESSION_STRING"))
+SESSION_STRING = os.environ.get("SESSION_STRING")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID"))
 
 # --- CHANNEL ROUTING ---
-SOURCE_CHANNEL = -1003357855905   # New source channel
-DESTINATION_CHANNEL = -1003891219488  # BREY TRADING FX VIP
+SOURCE_CHANNEL = -1003357855905
+DESTINATION_CHANNEL = -1003891219488
 
 CHANNEL_MAP = {
     SOURCE_CHANNEL: DESTINATION_CHANNEL,
@@ -26,10 +26,10 @@ CHANNEL_MAP = {
 
 # --- NAMES/WATERMARKS TO REMOVE ---
 NAMES_TO_REMOVE = [
-    r"@\w+",           # Remove all @usernames
-    r"t\.me/\S+",      # Remove all t.me links
-    r"https?://\S+",   # Remove all http links
-    r"www\.\S+",       # Remove www links
+    r"@\w+",
+    r"t\.me/\S+",
+    r"https?://\S+",
+    r"www\.\S+",
 ]
 
 # --- WORD REPLACEMENTS ---
@@ -74,7 +74,7 @@ BLOCKED_PHRASES = [
 # --- SYSTEM VARIABLES ---
 SETTINGS = {
     "ai_translate": True,
-    "target_language": "es",  # Spanish by default
+    "target_language": "es",
     "paused": False,
     "custom_replacements": {},
     "blocked_words": [],
@@ -100,9 +100,6 @@ user_client = TelegramClient(
 bot_client = TelegramClient(StringSession(), API_ID, API_HASH)
 
 
-# -------------------------------------------------------------------
-# HELPER FUNCTIONS
-# -------------------------------------------------------------------
 def is_authorized(sender_id):
     return sender_id == OWNER_ID
 
@@ -167,41 +164,43 @@ def is_blocked_word_found(text):
 
 
 def clean_message(text):
-    """Remove names, links, usernames from message."""
     if not text:
         return text
-    # Remove all @usernames
     text = re.sub(r'@\w+', '', text)
-    # Remove all links
     text = re.sub(
         r'https?://\S+|t\.me/\S+|www\.\S+|joinchat/\S+',
         '', text
     )
-    # Apply word replacements
     for pattern, replacement in WORD_REPLACEMENTS.items():
         text = re.sub(
             pattern, replacement, text, flags=re.IGNORECASE
         )
-    # Apply custom replacements
     for old, new in SETTINGS["custom_replacements"].items():
         text = re.sub(
             re.escape(old), new, text, flags=re.IGNORECASE
         )
-    # Normalize XAUUSD/BUY/SELL/TP/SL
-    text = re.sub(r'\bxauusd\b', 'XAUUSD', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bxau/usd\b', 'XAU/USD', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bbuy\b', 'BUY', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bsell\b', 'SELL', text, flags=re.IGNORECASE)
-    text = re.sub(r'\btp(\d)\b', r'TP\1', text, flags=re.IGNORECASE)
+    text = re.sub(
+        r'\bxauusd\b', 'XAUUSD', text, flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r'\bxau/usd\b', 'XAU/USD', text, flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r'\bbuy\b', 'BUY', text, flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r'\bsell\b', 'SELL', text, flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r'\btp(\d)\b', r'TP\1', text, flags=re.IGNORECASE
+    )
     text = re.sub(r'\bsl\b', 'SL', text, flags=re.IGNORECASE)
-    # Clean blank lines
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = text.strip()
     return text
 
 
 def translate_text(text):
-    """Translate to target language."""
     if not text or not SETTINGS["ai_translate"]:
         return text
     try:
@@ -211,12 +210,11 @@ def translate_text(text):
         ).translate(text)
         return translated if translated else text
     except Exception as e:
-        print(f"⚠️ Translation error: {e}")
+        print(f"Translation error: {e}")
         return text
 
 
 def process_message(raw_text):
-    """Clean → Translate → Sign."""
     if not raw_text:
         return None
     text = clean_message(raw_text)
@@ -228,9 +226,6 @@ def process_message(raw_text):
     return text + SIGNATURE
 
 
-# -------------------------------------------------------------------
-# MENU HELPERS
-# -------------------------------------------------------------------
 def get_language_buttons():
     buttons = []
     row = []
@@ -278,11 +273,7 @@ def get_main_menu_buttons():
     ]
 
 
-# -------------------------------------------------------------------
-# SAFE EDIT HELPER — fixes MessageNotModifiedError
-# -------------------------------------------------------------------
 async def safe_edit(event, text, buttons=None):
-    """Edit message safely, ignoring 'not modified' errors."""
     try:
         if buttons:
             await event.edit(text, buttons=buttons)
@@ -290,9 +281,9 @@ async def safe_edit(event, text, buttons=None):
             await event.edit(text)
     except Exception as e:
         if "not modified" in str(e).lower():
-            pass  # Silently ignore — content unchanged
+            pass
         else:
-            print(f"⚠️ Edit error: {e}")
+            print(f"Edit error: {e}")
 
 
 # -------------------------------------------------------------------
@@ -371,7 +362,7 @@ async def command_menu(event):
             f"• Reemplazos: "
             f"`{len(SETTINGS['custom_replacements'])}`\n"
             f"• Palabras bloqueadas: "
-            f"`{len(SETTINGS['blocked_words'])}`\n"
+            f"`{len(SETTINGS['blocked_words'])}`"
         )
 
     elif command == "/pause":
@@ -424,11 +415,11 @@ async def command_menu(event):
                 )
             else:
                 await event.respond(
-                    "❌ Usa: `/addword palabravieja:palabranueva`"
+                    "❌ Usa: `/addword palabravieja:nuevapalabra`"
                 )
         except Exception:
             await event.respond(
-                "❌ Usa: `/addword palabravieja:palabranueva`"
+                "❌ Usa: `/addword palabravieja:nuevapalabra`"
             )
 
     elif full_text.lower().startswith("/removeword "):
@@ -492,7 +483,7 @@ async def command_menu(event):
 
 
 # -------------------------------------------------------------------
-# BUTTON HANDLER — with safe_edit to fix crashes
+# BUTTON HANDLER
 # -------------------------------------------------------------------
 @bot_client.on(events.CallbackQuery())
 async def button_handler(event):
@@ -504,7 +495,9 @@ async def button_handler(event):
 
     if data == "toggle_translate":
         SETTINGS["ai_translate"] = not SETTINGS["ai_translate"]
-        status = "✅ ON" if SETTINGS["ai_translate"] else "🛑 OFF"
+        status = (
+            "✅ ON" if SETTINGS["ai_translate"] else "🛑 OFF"
+        )
         await event.answer(f"Traducción: {status}")
         await safe_edit(
             event,
@@ -530,8 +523,8 @@ async def button_handler(event):
         await event.answer(f"✅ {lang_name}")
         await safe_edit(
             event,
-            f"✅ **Idioma configurado: {lang_name}**\n"
-            f"Las señales se traducirán a {lang_name}.",
+            f"✅ **Idioma: {lang_name}**\n"
+            f"Señales traducidas a {lang_name}.",
             buttons=get_language_buttons()
         )
 
@@ -606,19 +599,16 @@ async def album_handler(event):
     if not destination_id:
         return
 
-    # Skip if noforwards protected
     for msg in event.messages:
         if is_noforwards(msg):
             print("⏭️ Skipped album: noforwards")
             return
 
-    # Skip audio/video
     for msg in event.messages:
         if is_audio_message(msg) or is_video_message(msg):
             print("⏭️ Skipped album: audio/video")
             return
 
-    # Get caption
     caption = None
     for msg in event.messages:
         if msg.message:
@@ -632,7 +622,6 @@ async def album_handler(event):
             caption = process_message(raw)
             break
 
-    # Collect photos only
     media_files = [
         msg.media for msg in event.messages
         if is_photo_message(msg)
@@ -663,19 +652,17 @@ async def replication_engine(event):
     if not destination_id:
         return
 
-    # Skip grouped (handled by album_handler)
     if event.message.grouped_id:
         return
 
-    # Skip noforwards
     if is_noforwards(event.message):
-        print("⏭️ Skipped: noforwards protection")
+        print("⏭️ Skipped: noforwards")
         return
 
-    # Skip audio/video
     if is_audio_message(event.message):
         print("⏭️ Skipped: audio")
         return
+
     if is_video_message(event.message):
         print("⏭️ Skipped: video")
         return
@@ -684,24 +671,19 @@ async def replication_engine(event):
     has_media = event.message.media is not None
     is_photo = is_photo_message(event.message)
 
-    # Skip completely empty
     if not raw_text and not has_media:
         return
 
-    # Check promotional content
     if raw_text and is_promotional(raw_text):
         print("⏭️ Skipped: promotional")
         return
 
-    # Check blocked words
     if raw_text and is_blocked_word_found(raw_text):
         print("⏭️ Skipped: blocked word")
         return
 
-    # Process text
     final_text = process_message(raw_text) if raw_text else None
 
-    # Send
     try:
         if is_photo:
             await user_client.send_file(
@@ -710,9 +692,8 @@ async def replication_engine(event):
                 caption=final_text
             )
         elif has_media and not is_photo:
-            # Skip non-photo media without text
             if not raw_text:
-                print("⏭️ Skipped: non-photo media no text")
+                print("⏭️ Skipped: non-photo no text")
                 return
             await user_client.send_message(
                 destination_id,
@@ -725,7 +706,7 @@ async def replication_engine(event):
                 destination_id,
                 final_text
             )
-        print(f"✅ Signal sent: {source_id} → {destination_id}")
+        print(f"✅ Signal: {source_id} → {destination_id}")
     except Exception as e:
         print(f"❌ Delivery failed: {e}")
 
@@ -739,16 +720,14 @@ async def main():
         print("❌ ERROR: Session string invalid or expired!")
         return
     print("✅ Userbot connected.")
-    print(f"📡 Monitoring source: {SOURCE_CHANNEL}")
+    print(f"📡 Source: {SOURCE_CHANNEL}")
 
     await bot_client.start(bot_token=BOT_TOKEN)
     print("✅ Bot control panel connected.")
 
     print("\n🚀 Brey Trading Signal Bot RUNNING!")
-    print("🌐 Default language: Español (Spanish)")
-    print(
-        f"📡 {SOURCE_CHANNEL} → {DESTINATION_CHANNEL}\n"
-    )
+    print("🌐 Default: Español (Spanish)")
+    print(f"📡 {SOURCE_CHANNEL} → {DESTINATION_CHANNEL}\n")
 
     await asyncio.gather(
         user_client.run_until_disconnected(),
