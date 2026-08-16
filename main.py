@@ -26,6 +26,9 @@ CHANNEL_MAP = {
 
 # --- NAMES/WATERMARKS TO REMOVE ---
 NAMES_TO_REMOVE = [
+    r"Switzy\s*VIP\s*Gold\s*",
+    r"Switzy\s*Personal\s*",
+    r"Switzy\s*",
     r"@\w+",
     r"t\.me/\S+",
     r"https?://\S+",
@@ -45,6 +48,7 @@ SIGNATURE = "\n\n📊 Brey's Signals | @BREYTRADING"
 
 # --- BLOCKED CONTENT ---
 BLOCKED_PHRASES = [
+    # Generic promotional
     r"join (our|my|the)?\s*(free|vip|premium|channel)",
     r"click (the|this)?\s*link",
     r"subscribe",
@@ -69,6 +73,84 @@ BLOCKED_PHRASES = [
     r"promo",
     r"refer",
     r"invite",
+    # Switzy channel specific spam
+    r"switzy",
+    r"envíen sus ganancias",
+    r"envien sus ganancias",
+    r"manda.*ganancias",
+    r"send.*ganancias",
+    r"500\s*[£€$£]",
+    r"like.*publicacion",
+    r"like.*publication",
+    r"dale like",
+    r"ganen.*dinero",
+    r"ganar dinero",
+    r"nuevos servicios",
+    r"new services",
+    r"acceso.*bot",
+    r"abriendo.*acceso",
+    r"opening.*access",
+    r"palabra.*bot",
+    r"enviar.*bot",
+    r"envíen.*mensaje",
+    r"envien.*mensaje",
+    r"\bchicos\b",
+    r"dos cosas",
+    r"ahora mismo estoy",
+    r"mensaje.*palabra",
+    r"para acceder",
+    r"todo lo que tienen que hacer",
+    r"todo lo que tienes que hacer",
+]
+
+# --- VALID GOLD SIGNAL PATTERNS ---
+GOLD_SIGNAL_PATTERNS = [
+    r"\bxauusd\b",
+    r"\bxau/usd\b",
+    r"\bxau\b",
+    r"\bgold\b",
+    r"\boro\b",
+    r"\bsell\b",
+    r"\bbuy\b",
+    r"\bvender\b",
+    r"\bcomprar\b",
+    r"\btp1\b",
+    r"\btp2\b",
+    r"\btp3\b",
+    r"\btp4\b",
+    r"\btp\s*\d\b",
+    r"take profit",
+    r"\bsl\b",
+    r"stop loss",
+    r"entrar entre",
+    r"\bentry\b",
+    r"\bentrada\b",
+    r"break even",
+    r"breakeven",
+    r"break en",
+    r"colocar break",
+    r"coloquen break",
+    r"\basegura\b",
+    r"\bsecure\b",
+    r"señal lista",
+    r"signal ready",
+    r"\bpendientes\b",
+    r"\bpips\b",
+    r"\bscalp\b",
+    r"price action",
+    r"\bsoporte\b",
+    r"\bresistencia\b",
+    r"\btendencia\b",
+    r"\bimpulso\b",
+    r"\banálisis\b",
+    r"\balcanzado\b",
+    r"\binvalidada\b",
+    r"\bcorriendo\b",
+    r"\bseguimos\b",
+    r"\bcierra\b",
+    r"\bdentro\b",
+    r"\bpagando\b",
+    r"50%",
 ]
 
 # --- SYSTEM VARIABLES ---
@@ -100,6 +182,9 @@ user_client = TelegramClient(
 bot_client = TelegramClient(StringSession(), API_ID, API_HASH)
 
 
+# -------------------------------------------------------------------
+# HELPER FUNCTIONS
+# -------------------------------------------------------------------
 def is_authorized(sender_id):
     return sender_id == OWNER_ID
 
@@ -146,9 +231,21 @@ def is_noforwards(message):
 
 
 def is_promotional(text):
+    """Check if message is promotional or spam."""
     if not text:
         return False
     for pattern in BLOCKED_PHRASES:
+        if re.search(pattern, text, re.IGNORECASE):
+            print(f"🚫 Blocked phrase: {pattern}")
+            return True
+    return False
+
+
+def is_valid_signal(text):
+    """Check if message contains valid trading signal content."""
+    if not text:
+        return False
+    for pattern in GOLD_SIGNAL_PATTERNS:
         if re.search(pattern, text, re.IGNORECASE):
             return True
     return False
@@ -164,21 +261,30 @@ def is_blocked_word_found(text):
 
 
 def clean_message(text):
+    """Remove names, links, usernames and normalize text."""
     if not text:
         return text
-    text = re.sub(r'@\w+', '', text)
+    # Remove source channel names
+    for pattern in NAMES_TO_REMOVE:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    # Remove all links
     text = re.sub(
         r'https?://\S+|t\.me/\S+|www\.\S+|joinchat/\S+',
         '', text
     )
+    # Remove leftover @handles
+    text = re.sub(r'@\w+', '', text)
+    # Apply word replacements
     for pattern, replacement in WORD_REPLACEMENTS.items():
         text = re.sub(
             pattern, replacement, text, flags=re.IGNORECASE
         )
+    # Apply custom replacements
     for old, new in SETTINGS["custom_replacements"].items():
         text = re.sub(
             re.escape(old), new, text, flags=re.IGNORECASE
         )
+    # Normalize trading terms
     text = re.sub(
         r'\bxauusd\b', 'XAUUSD', text, flags=re.IGNORECASE
     )
@@ -195,12 +301,23 @@ def clean_message(text):
         r'\btp(\d)\b', r'TP\1', text, flags=re.IGNORECASE
     )
     text = re.sub(r'\bsl\b', 'SL', text, flags=re.IGNORECASE)
+    # Remove lines that are empty after cleaning
+    lines = text.split('\n')
+    cleaned_lines = [
+        line for line in lines
+        if line.strip() and not re.match(
+            r'^[\s\-_•|/\\:.]+$', line.strip()
+        )
+    ]
+    text = '\n'.join(cleaned_lines)
+    # Collapse excess blank lines
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = text.strip()
     return text
 
 
 def translate_text(text):
+    """Translate to target language."""
     if not text or not SETTINGS["ai_translate"]:
         return text
     try:
@@ -210,11 +327,12 @@ def translate_text(text):
         ).translate(text)
         return translated if translated else text
     except Exception as e:
-        print(f"Translation error: {e}")
+        print(f"⚠️ Translation error: {e}")
         return text
 
 
 def process_message(raw_text):
+    """Full pipeline: clean → translate → sign."""
     if not raw_text:
         return None
     text = clean_message(raw_text)
@@ -226,6 +344,9 @@ def process_message(raw_text):
     return text + SIGNATURE
 
 
+# -------------------------------------------------------------------
+# MENU HELPERS
+# -------------------------------------------------------------------
 def get_language_buttons():
     buttons = []
     row = []
@@ -274,6 +395,7 @@ def get_main_menu_buttons():
 
 
 async def safe_edit(event, text, buttons=None):
+    """Edit message safely ignoring not-modified errors."""
     try:
         if buttons:
             await event.edit(text, buttons=buttons)
@@ -283,7 +405,7 @@ async def safe_edit(event, text, buttons=None):
         if "not modified" in str(e).lower():
             pass
         else:
-            print(f"Edit error: {e}")
+            print(f"⚠️ Edit error: {e}")
 
 
 # -------------------------------------------------------------------
@@ -300,9 +422,10 @@ async def command_menu(event):
     if command == "/start":
         await event.respond(
             "👋 **Bienvenido a Brey Trading Signal Bot!**\n\n"
-            "📡 Copiando señales automáticamente\n"
+            "📡 Copiando señales de Gold automáticamente\n"
             "➡️ Destino: **BREY TRADING FX VIP**\n\n"
-            "🌐 Idioma predeterminado: **Español**\n\n"
+            "🌐 Idioma predeterminado: **Español**\n"
+            "🚫 Mensajes promocionales: **Bloqueados**\n\n"
             "Usa los botones para controlar el bot.",
             buttons=get_main_menu_buttons()
         )
@@ -321,7 +444,7 @@ async def command_menu(event):
             "➡️ `/menu` - Panel de control\n"
             "➡️ `/help` - Todos los comandos\n"
             "➡️ `/status` - Estado actual\n"
-            "➡️ `/channels` - Canales configurados\n\n"
+            "➡️ `/channels` - Canales\n\n"
             "**⏯ Control:**\n"
             "➡️ `/pause` - Pausar bot\n"
             "➡️ `/resume` - Reanudar bot\n\n"
@@ -396,7 +519,9 @@ async def command_menu(event):
                 (k for k, v in LANGUAGES.items() if v == lang),
                 lang
             )
-            await event.respond(f"🌐 **Idioma: {lang_name}**")
+            await event.respond(
+                f"🌐 **Idioma: {lang_name}**"
+            )
         else:
             await event.respond(
                 f"❌ No soportado: `{lang}`\n"
@@ -476,7 +601,8 @@ async def command_menu(event):
     elif command == "/channels":
         await event.respond(
             "📡 **Configuración de Canales:**\n\n"
-            f"**Canal Fuente ID:** `{SOURCE_CHANNEL}`\n"
+            f"**Canal Fuente:** Switzy VIP Gold\n"
+            f"**Fuente ID:** `{SOURCE_CHANNEL}`\n\n"
             f"**Canal Destino:** BREY TRADING FX VIP\n"
             f"**Destino ID:** `{DESTINATION_CHANNEL}`"
         )
@@ -559,8 +685,8 @@ async def button_handler(event):
             f"• Estado: `{paused}`\n"
             f"• Traducción: `{translate}`\n"
             f"• Idioma: `{lang_name}`\n"
-            f"• Canal fuente: `{SOURCE_CHANNEL}`\n"
-            f"• Canal destino: `{DESTINATION_CHANNEL}`",
+            f"• Fuente: `{SOURCE_CHANNEL}`\n"
+            f"• Destino: `{DESTINATION_CHANNEL}`",
             buttons=[[Button.inline("🔙 Volver", "back_menu")]]
         )
 
@@ -569,7 +695,8 @@ async def button_handler(event):
         await safe_edit(
             event,
             f"📡 **Canales:**\n\n"
-            f"• **Fuente ID:** `{SOURCE_CHANNEL}`\n"
+            f"• **Fuente:** Switzy VIP Gold\n"
+            f"• **Fuente ID:** `{SOURCE_CHANNEL}`\n\n"
             f"• **Destino:** BREY TRADING FX VIP\n"
             f"• **Destino ID:** `{DESTINATION_CHANNEL}`",
             buttons=[[Button.inline("🔙 Volver", "back_menu")]]
@@ -674,16 +801,29 @@ async def replication_engine(event):
     if not raw_text and not has_media:
         return
 
+    # Block promotional content
     if raw_text and is_promotional(raw_text):
         print("⏭️ Skipped: promotional")
         return
 
+    # Block custom blocked words
     if raw_text and is_blocked_word_found(raw_text):
         print("⏭️ Skipped: blocked word")
         return
 
+    # For text only messages — must be valid signal
+    if not has_media and raw_text:
+        if not is_valid_signal(raw_text):
+            print("⏭️ Skipped: not a valid signal")
+            return
+
+    # For photos — allow with or without caption
+    # (charts often come without text)
+
+    # Process text
     final_text = process_message(raw_text) if raw_text else None
 
+    # Send
     try:
         if is_photo:
             await user_client.send_file(
@@ -727,6 +867,7 @@ async def main():
 
     print("\n🚀 Brey Trading Signal Bot RUNNING!")
     print("🌐 Default: Español (Spanish)")
+    print("🚫 Promotional messages: BLOCKED")
     print(f"📡 {SOURCE_CHANNEL} → {DESTINATION_CHANNEL}\n")
 
     await asyncio.gather(
