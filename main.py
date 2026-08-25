@@ -117,7 +117,7 @@ BLOCKED_PHRASES = [
     r"para acceder",
     r"todo lo que tienen que hacer",
     r"todo lo que tienes que hacer",
-    # Error messages that got through before
+    # Error messages
     r"error\s*500",
     r"server error",
     r"error.*servidor",
@@ -174,9 +174,10 @@ GOLD_SIGNAL_PATTERNS = [
 ]
 
 # --- SYSTEM VARIABLES ---
+# TARGET LANGUAGE IS SPANISH (es) — DO NOT CHANGE
 SETTINGS = {
     "ai_translate": True,
-    "target_language": "es",
+    "target_language": "es",   # Spanish — client's language
     "paused": False,
     "custom_replacements": {},
     "blocked_words": [],
@@ -279,7 +280,6 @@ def is_blocked_word_found(text):
 
 
 def is_error_message(text):
-    """Catch translation or server errors before sending."""
     if not text:
         return False
     error_patterns = [
@@ -350,18 +350,16 @@ def clean_message(text):
 
 def translate_text(text):
     """
-    Safely translate text.
-    Returns ORIGINAL text if translation fails —
-    never returns an error string.
+    Translate text to Spanish (es).
+    Returns ORIGINAL text if translation fails — never an error string.
     """
     if not text or not SETTINGS["ai_translate"]:
         return text
     try:
         translated = GoogleTranslator(
             source='auto',
-            target=SETTINGS["target_language"]
+            target=SETTINGS["target_language"]   # Always "es"
         ).translate(text)
-        # Validate translation result
         if not translated:
             print("⚠️ Translation returned empty — using original")
             return text
@@ -371,17 +369,16 @@ def translate_text(text):
         return translated
     except Exception as e:
         print(f"⚠️ Translation failed: {e} — using original text")
-        return text  # Always return original, never an error
+        return text
 
 
 def process_message(raw_text):
-    """Clean → Translate safely → Sign."""
+    """Clean → Translate to Spanish → Sign."""
     if not raw_text:
         return None
     text = clean_message(raw_text)
     if not text:
         return None
-    # Only translate if text is not already an error
     if not is_error_message(text):
         text = translate_text(text)
     if not text or is_error_message(text):
@@ -786,7 +783,6 @@ async def album_handler(event):
                 print("⏭️ Skipped album: blocked word")
                 return
             caption = process_message(raw)
-            # If process_message returns None (error), skip
             if caption is None and raw:
                 print("⏭️ Skipped album: message processing failed")
                 return
@@ -844,32 +840,26 @@ async def replication_engine(event):
     if not raw_text and not has_media:
         return
 
-    # Block promotional content
     if raw_text and is_promotional(raw_text):
         print("⏭️ Skipped: promotional")
         return
 
-    # Block custom blocked words
     if raw_text and is_blocked_word_found(raw_text):
         print("⏭️ Skipped: blocked word")
         return
 
-    # Text only — must be valid signal
     if not has_media and raw_text:
         if not is_valid_signal(raw_text):
             print("⏭️ Skipped: not a valid signal")
             return
 
-    # Process text safely
     final_text = None
     if raw_text:
         final_text = process_message(raw_text)
-        # If processing returned None (error occurred), skip
         if final_text is None:
             print("⏭️ Skipped: message processing returned error")
             return
 
-    # Send
     try:
         if is_photo:
             await user_client.send_file(
@@ -925,3 +915,4 @@ async def main():
 
 
 asyncio.run(main())
+
