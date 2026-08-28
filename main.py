@@ -38,6 +38,12 @@ PRESERVE_TERMS = {
     "SL": "__SL__",
     "BUY": "__BUY__",
     "SELL": "__SELL__",
+    "SCALP": "__SCALP__",
+    "SCALPING": "__SCALPING__",
+    "BREAKEVEN": "__BREAKEVEN__",
+    "BREAK EVEN": "__BREAKEVEN2__",
+    "PIPS": "__PIPS__",
+    "PIP": "__PIP__",
 }
 
 # Reverse map for restoration
@@ -137,12 +143,18 @@ BLOCKED_PHRASES = [
     r"para acceder",
     r"todo lo que tienen que hacer",
     r"todo lo que tienes que hacer",
-    # Error messages
-    r"error\s*500",
-    r"server error",
-    r"error.*servidor",
+    # Error messages — aggressive matching
+    r"error\s*5\d\d",
+    r"server\s*error",
+    r"there was an error",
+    r"please try again",
     r"try again later",
+    r"that's all we know",
+    r"thats all we know",
+    r"error.*servidor",
     r"intenta.*más tarde",
+    r"!!1500",
+    r"1500\.that",
 ]
 
 # --- VALID GOLD SIGNAL PATTERNS ---
@@ -381,10 +393,43 @@ def is_blocked_word_found(text):
     return False
 
 
-def clean_message(text):
-    """Remove names, links, usernames."""
+ERROR_LINE_PATTERNS = [
+    r"error\s*5\d\d",
+    r"server\s*error",
+    r"there was an error",
+    r"please try again",
+    r"try again later",
+    r"that'?s all we know",
+    r"!!1500",
+    r"1500\.that",
+    r"an error\.",
+]
+
+
+def strip_error_lines(text):
+    """Remove any lines containing error messages from within a signal."""
     if not text:
         return text
+    lines = text.split('\n')
+    clean_lines = []
+    for line in lines:
+        is_error = False
+        for pattern in ERROR_LINE_PATTERNS:
+            if re.search(pattern, line, re.IGNORECASE):
+                print(f"🧹 Stripped error line: {line.strip()}")
+                is_error = True
+                break
+        if not is_error:
+            clean_lines.append(line)
+    return '\n'.join(clean_lines)
+
+
+def clean_message(text):
+    """Remove names, links, usernames, and embedded error lines."""
+    if not text:
+        return text
+    # Step 0: Strip error lines embedded inside signal
+    text = strip_error_lines(text)
     # Remove source channel names
     for pattern in NAMES_TO_REMOVE:
         text = re.sub(pattern, "", text, flags=re.IGNORECASE)
@@ -854,4 +899,3 @@ async def main():
 
 
 asyncio.run(main())
-
