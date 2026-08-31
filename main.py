@@ -7,6 +7,16 @@ from telethon.tl.types import (
     MessageMediaPhoto,
     MessageMediaDocument,
 )
+from telethon.errors import (
+    FloodWaitError,
+    ChatWriteForbiddenError,
+    ChannelPrivateError,
+    MessageNotModifiedError,
+    SlowModeWaitError,
+    ServerError,
+    RpcCallFailError,
+    BadRequestError,
+)
 from deep_translator import GoogleTranslator
 
 # --- ENVIRONMENT CONFIGURATION ---
@@ -25,7 +35,6 @@ CHANNEL_MAP = {
 }
 
 # --- TRADING TERMS TO PRESERVE (never translate these) ---
-# These are injected back after translation to keep them exact
 PRESERVE_TERMS = {
     "XAUUSD": "__XAUUSD__",
     "XAU/USD": "__XAUUSD2__",
@@ -46,7 +55,6 @@ PRESERVE_TERMS = {
     "PIP": "__PIP__",
 }
 
-# Reverse map for restoration
 RESTORE_TERMS = {v: k for k, v in PRESERVE_TERMS.items()}
 
 # --- NAMES/WATERMARKS TO REMOVE ---
@@ -60,21 +68,11 @@ NAMES_TO_REMOVE = [
     r"www\.\S+",
 ]
 
-# --- WORD REPLACEMENTS (applied AFTER translation) ---
-WORD_REPLACEMENTS = {
-    r"\bVENDER\b": "VENDER",
-    r"\bSELL\b": "VENDER",
-    r"\bBUY\b": "COMPRAR",
-    r"\bCompra\b": "COMPRAR",
-    r"\bVende\b": "VENDER",
-}
-
 # --- SIGNATURE ---
 SIGNATURE = "\n\n📊 Brey's Signals | @BREYTRADING"
 
 # --- BLOCKED CONTENT ---
 BLOCKED_PHRASES = [
-    # Generic promotional
     r"join (our|my|the)?\s*(free|vip|premium|channel)",
     r"click (the|this)?\s*link",
     r"subscribe",
@@ -99,7 +97,6 @@ BLOCKED_PHRASES = [
     r"promo",
     r"refer",
     r"invite",
-    # Meta/Facebook ads
     r"meta\s*(ads|business|campaign)",
     r"facebook\s*ads",
     r"campaña",
@@ -115,7 +112,6 @@ BLOCKED_PHRASES = [
     r"costo por",
     r"entrega activada",
     r"revisar.*anuncio",
-    # Switzy spam
     r"switzy",
     r"envíen sus ganancias",
     r"envien sus ganancias",
@@ -143,18 +139,20 @@ BLOCKED_PHRASES = [
     r"para acceder",
     r"todo lo que tienen que hacer",
     r"todo lo que tienes que hacer",
-    # Error messages — aggressive matching
+    # --- ALL ERROR MESSAGE PATTERNS BLOCKED UPFRONT ---
     r"error\s*5\d\d",
     r"server\s*error",
     r"there was an error",
     r"please try again",
     r"try again later",
-    r"that's all we know",
+    r"that'?s all we know",
     r"thats all we know",
     r"error.*servidor",
     r"intenta.*más tarde",
     r"!!1500",
     r"1500\.that",
+    r"1500\.",
+    r"\b1500\b",
 ]
 
 # --- VALID GOLD SIGNAL PATTERNS ---
@@ -216,6 +214,10 @@ SETTINGS = {
     "blocked_words": [],
 }
 
+# --- SEND QUEUE (prevents rapid-fire sends that cause rate limits) ---
+_send_queue = asyncio.Queue()
+_send_lock = asyncio.Lock()
+
 print("Starting Brey Trading Signal Bot...")
 
 user_client = TelegramClient(
@@ -224,92 +226,157 @@ user_client = TelegramClient(
 bot_client = TelegramClient(StringSession(), API_ID, API_HASH)
 
 
-# -------------------------------------------------------------------
-# TRANSLATION — ALWAYS SPANISH, NO EXCEPTIONS
-# -------------------------------------------------------------------
-def protect_terms(text):
-    """Replace trading terms with placeholders before translation."""
+# ===================================================================
+# ERROR TEXT DETECTION — runs BEFORE any processing
+# ===================================================================
+
+# Compiled once at startup for performance
+_ERROR_RAW_PATTERNS = re.compile(
+    r"(Error\s*5\d\d"
+    r"|Server\s*Error"
+    r"|There\s+was\s+an\s+error"
+    r"|Please\s+try\s+again"
+    r"|try\s+again\s+later"
+    r"|That'?s\s+all\s+we\s+know"
+    r"|!!1500"
+    r"|1500\.?"
+    r"|\b500\b.*error"
+    r"|RpcCallFail"
+    r"|Internal\s+Server)",
+    re.IGNORECASE,
+)
+
+_ERROR_LINE_PATTERNS = re.compile(
+    r"(error\s*5\d\d"
+    r"|server\s*error"
+    r"|there\s+was\s+an\s+error"
+    r"|please\s+try\s+again"
+    r"|try\s+again\s+later"
+    r"|that'?s\s+all\s+we\s+know"
+    r"|!!1500"
+    r"|\b1500\b"
+    r"|an\s+error\.)",
+    re.IGNORECASE,
+)
+
+_ERROR_INLINE_PATTERNS = [
+    re.compile(p, re.IGNORECASE | re.DOTALL) for p in [
+        r"Error\s*5\d\d\s*\(Server Error\)[^.]*?That'?s all we know\.?",
+        r"Error\s*5\d\d\s*\(Server Error\)[^\n]*",
+        r"!!1500\.?That'?s an error\.",
+        r"There was an error\.\s*Please try again later\.",
+        r"Please try again later\.?\s*That'?s all we know\.?",
+        r"That'?s all we know\.?",
+        r"There was an error\.",
+        r"Please try again later\.",
+        r"!!1500",
+        r"\b1500\b",
+    ]
+]
+
+
+def is_pure_error_message(text: str) -> bool:
+    """
+    Returns True if the ENTIRE message is an error message
+    (no real signal content). Checked BEFORE any processing.
+    """
+    if not text:
+        return False
+    return bool(_ERROR_RAW_PATTERNS.search(text))
+
+
+def strip_error_fragments(text: str) -> str:
+    """
+    Surgically removes error text fragments embedded inside
+    an otherwise valid signal. Runs inline AND line-by-line.
+    """
+    if not text:
+        return text
+
+    # Pass 1: remove inline error blocks (multi-word patterns first)
+    for pattern in _ERROR_INLINE_PATTERNS:
+        text = pattern.sub("", text)
+
+    # Pass 2: remove full lines that are pure error lines
+    lines = text.split("\n")
+    clean = []
+    for line in lines:
+        if _ERROR_LINE_PATTERNS.search(line):
+            print(f"🧹 Stripped error line: {line.strip()!r}")
+        else:
+            clean.append(line)
+
+    text = "\n".join(clean)
+
+    # Pass 3: collapse excess blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+# ===================================================================
+# TRANSLATION
+# ===================================================================
+
+def protect_terms(text: str) -> str:
     for term, placeholder in PRESERVE_TERMS.items():
-        # Case-insensitive replacement
-        pattern = re.compile(re.escape(term), re.IGNORECASE)
-        text = pattern.sub(placeholder, text)
+        text = re.compile(re.escape(term), re.IGNORECASE).sub(
+            placeholder, text
+        )
     return text
 
 
-def restore_terms(text):
-    """Restore trading term placeholders back to original terms."""
+def restore_terms(text: str) -> str:
     for placeholder, term in RESTORE_TERMS.items():
         text = text.replace(placeholder, term)
     return text
 
 
-def translate_to_spanish(text):
-    """
-    Translate any text to Spanish using Google Translate.
-    Protects trading terms from being mistranslated.
-    Falls back to cleaned original if translation fails.
-    """
+def translate_to_spanish(text: str) -> str:
     if not text or not text.strip():
         return text
-
     try:
-        # Step 1: Protect trading terms
         protected = protect_terms(text)
-
-        # Step 2: Translate line by line to preserve formatting
-        lines = protected.split('\n')
+        lines = protected.split("\n")
         translated_lines = []
 
         for line in lines:
             stripped = line.strip()
             if not stripped:
-                translated_lines.append('')
+                translated_lines.append("")
                 continue
 
-            # Don't translate lines that are purely numbers/symbols/placeholders
-            if re.match(r'^[\d\s\.\-\+\:\%\_\_]+$', stripped):
+            if re.match(r"^[\d\s.\-+:%__]+$", stripped):
                 translated_lines.append(line)
                 continue
 
-            # Don't translate lines that are only placeholders
             if all(
-                word.startswith('__') and word.endswith('__')
-                for word in stripped.split()
-                if word
+                w.startswith("__") and w.endswith("__")
+                for w in stripped.split()
+                if w
             ):
                 translated_lines.append(line)
                 continue
 
             try:
-                translator = GoogleTranslator(
-                    source='auto', target='es'
-                )
-                translated_line = translator.translate(stripped)
+                translated = GoogleTranslator(
+                    source="auto", target="es"
+                ).translate(stripped)
                 translated_lines.append(
-                    translated_line if translated_line else stripped
+                    translated if translated else stripped
                 )
             except Exception:
-                # Keep original line if translation fails
                 translated_lines.append(line)
 
-        result = '\n'.join(translated_lines)
-
-        # Step 3: Restore trading terms
+        result = "\n".join(translated_lines)
         result = restore_terms(result)
 
-        # Step 4: Normalize key trading terms to uppercase
-        result = re.sub(
-            r'\bxauusd\b', 'XAUUSD', result, flags=re.IGNORECASE
-        )
-        result = re.sub(
-            r'\bxau/usd\b', 'XAU/USD', result, flags=re.IGNORECASE
-        )
-        result = re.sub(
-            r'\btp(\d)\b', r'TP\1', result, flags=re.IGNORECASE
-        )
-        result = re.sub(r'\bsl\b', 'SL', result, flags=re.IGNORECASE)
+        # Normalise key terms
+        result = re.sub(r"\bxauusd\b", "XAUUSD", result, flags=re.IGNORECASE)
+        result = re.sub(r"\bxau/usd\b", "XAU/USD", result, flags=re.IGNORECASE)
+        result = re.sub(r"\btp(\d)\b", r"TP\1", result, flags=re.IGNORECASE)
+        result = re.sub(r"\bsl\b", "SL", result, flags=re.IGNORECASE)
 
-        print(f"✅ Translated to Spanish")
+        print("✅ Translated to Spanish")
         return result
 
     except Exception as e:
@@ -317,229 +384,219 @@ def translate_to_spanish(text):
         return text
 
 
-# -------------------------------------------------------------------
-# HELPER FUNCTIONS
-# -------------------------------------------------------------------
-def is_authorized(sender_id):
+# ===================================================================
+# HELPERS
+# ===================================================================
+
+def is_authorized(sender_id: int) -> bool:
     return sender_id == OWNER_ID
 
 
-def is_audio_message(message):
+def is_audio_message(message) -> bool:
     if not message.media:
         return False
     if isinstance(message.media, MessageMediaDocument):
         doc = message.media.document
-        if hasattr(doc, 'mime_type') and doc.mime_type:
-            if doc.mime_type.startswith('audio/'):
+        if getattr(doc, "mime_type", "").startswith("audio/"):
+            return True
+        for attr in getattr(doc, "attributes", []):
+            if type(attr).__name__ in (
+                "DocumentAttributeAudio", "DocumentAttributeVoice"
+            ):
                 return True
-        if hasattr(doc, 'attributes'):
-            for attr in doc.attributes:
-                if type(attr).__name__ in [
-                    'DocumentAttributeAudio',
-                    'DocumentAttributeVoice'
-                ]:
-                    return True
     return False
 
 
-def is_video_message(message):
+def is_video_message(message) -> bool:
     if not message.media:
         return False
     if isinstance(message.media, MessageMediaDocument):
         doc = message.media.document
-        if hasattr(doc, 'mime_type') and doc.mime_type:
-            if doc.mime_type.startswith('video/'):
+        if getattr(doc, "mime_type", "").startswith("video/"):
+            return True
+        for attr in getattr(doc, "attributes", []):
+            if type(attr).__name__ == "DocumentAttributeVideo":
                 return True
-        if hasattr(doc, 'attributes'):
-            for attr in doc.attributes:
-                if type(attr).__name__ == 'DocumentAttributeVideo':
-                    return True
     return False
 
 
-def is_photo_message(message):
+def is_photo_message(message) -> bool:
     return isinstance(message.media, MessageMediaPhoto)
 
 
-def is_noforwards(message):
-    return getattr(message, 'noforwards', False)
+def is_noforwards(message) -> bool:
+    return getattr(message, "noforwards", False)
 
 
-def is_promotional(text):
+def is_promotional(text: str) -> bool:
     if not text:
         return False
     for pattern in BLOCKED_PHRASES:
         if re.search(pattern, text, re.IGNORECASE):
-            print(f"🚫 Blocked: {pattern}")
+            print(f"🚫 Blocked phrase: {pattern!r}")
             return True
     return False
 
 
-def is_valid_signal(text):
+def is_valid_signal(text: str) -> bool:
     if not text:
         return False
-    for pattern in GOLD_SIGNAL_PATTERNS:
-        if re.search(pattern, text, re.IGNORECASE):
-            return True
-    return False
+    return any(
+        re.search(p, text, re.IGNORECASE)
+        for p in GOLD_SIGNAL_PATTERNS
+    )
 
 
-def is_blocked_word_found(text):
+def is_blocked_word_found(text: str) -> bool:
     if not text:
         return False
-    for word in SETTINGS["blocked_words"]:
-        if word.lower() in text.lower():
-            return True
-    return False
+    return any(
+        w.lower() in text.lower() for w in SETTINGS["blocked_words"]
+    )
 
 
-# These patterns match error sentences that appear inline (no newlines)
-ERROR_INLINE_PATTERNS = [
-    # Matches the full Error 500 block in any form
-    r"Error\s*5\d\d\s*\(Server Error\)[^\n]*?That'?s all we know\.?",
-    r"Error\s*5\d\d\s*\(Server Error\)[^\n]*",
-    r"!!1500\.?That'?s an error\.",
-    r"There was an error\.\s*Please try again later\.",
-    r"Please try again later\.?\s*That'?s all we know\.?",
-    r"That'?s all we know\.?",
-    r"There was an error\.",
-    r"Please try again later\.",
-    r"!!1500",
-]
-
-# These patterns match full lines that are pure error lines
-ERROR_LINE_PATTERNS = [
-    r"error\s*5\d\d",
-    r"server\s*error",
-    r"there was an error",
-    r"please try again",
-    r"try again later",
-    r"that'?s all we know",
-    r"!!1500",
-    r"1500\.?that",
-    r"an error\.",
-]
-
-
-def strip_error_lines(text):
-    """
-    Remove error messages from signals.
-    Handles both:
-    1. Full lines that are error messages
-    2. Error text embedded inline within a line (no newlines)
-    """
+def clean_message(text: str) -> str:
     if not text:
         return text
 
-    # Step 1: Remove inline error patterns first (no newline boundaries)
-    for pattern in ERROR_INLINE_PATTERNS:
-        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+    # Strip error fragments FIRST, before anything else
+    text = strip_error_fragments(text)
 
-    # Step 2: Remove full lines that contain error patterns
-    lines = text.split('\n')
-    clean_lines = []
-    for line in lines:
-        is_error = False
-        for pattern in ERROR_LINE_PATTERNS:
-            if re.search(pattern, line, re.IGNORECASE):
-                print(f"🧹 Stripped error line: {line.strip()}")
-                is_error = True
-                break
-        if not is_error:
-            clean_lines.append(line)
-
-    result = '\n'.join(clean_lines)
-
-    # Step 3: Clean up any leftover blank lines or artifacts
-    result = re.sub(r'\n{3,}', '\n\n', result)
-    result = result.strip()
-    return result
-
-
-def clean_message(text):
-    """Remove names, links, usernames, and embedded error lines."""
-    if not text:
-        return text
-    # Step 0: Strip error lines embedded inside signal
-    text = strip_error_lines(text)
-    # Remove source channel names
     for pattern in NAMES_TO_REMOVE:
         text = re.sub(pattern, "", text, flags=re.IGNORECASE)
-    # Remove all links
+
     text = re.sub(
-        r'https?://\S+|t\.me/\S+|www\.\S+|joinchat/\S+',
-        '', text
+        r"https?://\S+|t\.me/\S+|www\.\S+|joinchat/\S+",
+        "", text,
     )
-    # Remove leftover @handles
-    text = re.sub(r'@\w+', '', text)
-    # Apply custom replacements
+    text = re.sub(r"@\w+", "", text)
+
     for old, new in SETTINGS["custom_replacements"].items():
-        text = re.sub(
-            re.escape(old), new, text, flags=re.IGNORECASE
-        )
-    # Clean blank lines
-    lines = text.split('\n')
-    cleaned_lines = [
-        line for line in lines
-        if line.strip() and not re.match(
-            r'^[\s\-_•|/\\:.]+$', line.strip()
-        )
+        text = re.sub(re.escape(old), new, text, flags=re.IGNORECASE)
+
+    lines = [
+        ln for ln in text.split("\n")
+        if ln.strip() and not re.match(r"^[\s\-_•|/\\:.]+$", ln.strip())
     ]
-    text = '\n'.join(cleaned_lines)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    text = text.strip()
-    return text
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
-def apply_spanish_fixes(text):
-    """
-    Post-translation fixes: ensure BUY/SELL are in Spanish,
-    and key trading terms are correct.
-    """
+def apply_spanish_fixes(text: str) -> str:
     if not text:
         return text
-    # Always Spanish for direction terms
-    text = re.sub(r'\bBUY\b', 'COMPRAR', text)
-    text = re.sub(r'\bSELL\b', 'VENDER', text)
-    text = re.sub(r'\bComprar\b', 'COMPRAR', text)
-    text = re.sub(r'\bVender\b', 'VENDER', text)
-    # Normalize trading terms
-    text = re.sub(r'\bxauusd\b', 'XAUUSD', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bxau/usd\b', 'XAU/USD', text, flags=re.IGNORECASE)
-    text = re.sub(r'\btp(\d)\b', r'TP\1', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bsl\b', 'SL', text, flags=re.IGNORECASE)
+    text = re.sub(r"\bBUY\b", "COMPRAR", text)
+    text = re.sub(r"\bSELL\b", "VENDER", text)
+    text = re.sub(r"\bComprar\b", "COMPRAR", text)
+    text = re.sub(r"\bVender\b", "VENDER", text)
+    text = re.sub(r"\bxauusd\b", "XAUUSD", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bxau/usd\b", "XAU/USD", text, flags=re.IGNORECASE)
+    text = re.sub(r"\btp(\d)\b", r"TP\1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bsl\b", "SL", text, flags=re.IGNORECASE)
     return text
 
 
-def process_message(raw_text):
-    """Clean → Translate to Spanish → Fix terms → Sign."""
+def process_message(raw_text: str):
+    """
+    Full pipeline:
+      1. Detect pure error messages → reject immediately
+      2. Clean watermarks + strip embedded errors
+      3. Translate to Spanish
+      4. Post-translation fixes
+      5. Sign
+    Returns None if nothing valid remains.
+    """
     if not raw_text:
         return None
 
-    # Step 1: Clean watermarks/links
+    # --- GATE 1: reject messages that ARE error messages ---
+    if is_pure_error_message(raw_text):
+        print("🚫 Rejected: pure error message")
+        return None
+
     text = clean_message(raw_text)
     if not text:
         return None
 
-    # Step 2: ALWAYS translate to Spanish
+    # --- GATE 2: after cleaning, re-check if anything valid remains ---
+    if is_pure_error_message(text):
+        print("🚫 Rejected: only error content after cleaning")
+        return None
+
     text = translate_to_spanish(text)
     if not text:
         return None
 
-    # Step 3: Post-translation Spanish fixes
     text = apply_spanish_fixes(text)
-
-    # Step 4: Sign
     return text + SIGNATURE
 
 
-# -------------------------------------------------------------------
+# ===================================================================
+# SAFE SEND WITH RETRY + FLOOD WAIT HANDLING
+# ===================================================================
+
+async def safe_send(coro_factory, retries: int = 3, base_delay: float = 2.0):
+    """
+    Wraps a send coroutine with:
+    - FloodWaitError: waits the required time then retries
+    - ServerError / RpcCallFailError: exponential backoff retry
+    - Other errors: logged, not retried
+    """
+    for attempt in range(retries):
+        try:
+            await coro_factory()
+            return True
+
+        except FloodWaitError as e:
+            wait = e.seconds + 2
+            print(f"⏳ FloodWait: sleeping {wait}s (attempt {attempt+1})")
+            await asyncio.sleep(wait)
+
+        except SlowModeWaitError as e:
+            wait = e.seconds + 1
+            print(f"⏳ SlowMode: sleeping {wait}s")
+            await asyncio.sleep(wait)
+
+        except (ServerError, RpcCallFailError) as e:
+            # This is the Error 500 from Telegram's side
+            delay = base_delay * (2 ** attempt)
+            print(
+                f"⚠️ Telegram server error (attempt {attempt+1}/{retries}): "
+                f"{e} — retrying in {delay:.1f}s"
+            )
+            await asyncio.sleep(delay)
+
+        except ChatWriteForbiddenError:
+            print("❌ No write permission to destination channel.")
+            return False
+
+        except ChannelPrivateError:
+            print("❌ Destination channel is private / bot not member.")
+            return False
+
+        except BadRequestError as e:
+            print(f"❌ Bad request (not retrying): {e}")
+            return False
+
+        except Exception as e:
+            delay = base_delay * (2 ** attempt)
+            print(
+                f"❌ Unexpected error (attempt {attempt+1}/{retries}): "
+                f"{e} — retrying in {delay:.1f}s"
+            )
+            await asyncio.sleep(delay)
+
+    print("❌ All retries exhausted — message dropped.")
+    return False
+
+
+# ===================================================================
 # MENU HELPERS
-# -------------------------------------------------------------------
+# ===================================================================
+
 def get_main_menu_buttons():
-    pause_label = (
-        "▶️ Reanudar" if SETTINGS["paused"] else "⏸ Pausar"
-    )
+    pause_label = "▶️ Reanudar" if SETTINGS["paused"] else "⏸ Pausar"
     return [
         [Button.inline(pause_label, "toggle_pause")],
         [Button.inline("📊 Estado", "show_status")],
@@ -550,21 +607,17 @@ def get_main_menu_buttons():
 
 async def safe_edit(event, text, buttons=None):
     try:
-        if buttons:
-            await event.edit(text, buttons=buttons)
-        else:
-            await event.edit(text)
-    except Exception as e:
-        if "not modified" in str(e).lower():
-            pass
-        else:
+        await (event.edit(text, buttons=buttons) if buttons else event.edit(text))
+    except (MessageNotModifiedError, Exception) as e:
+        if "not modified" not in str(e).lower():
             print(f"Edit error: {e}")
 
 
-# -------------------------------------------------------------------
-# COMMAND HANDLER
-# -------------------------------------------------------------------
-@bot_client.on(events.NewMessage(pattern=r'^/'))
+# ===================================================================
+# COMMAND HANDLER (bot_client)
+# ===================================================================
+
+@bot_client.on(events.NewMessage(pattern=r"^/"))
 async def command_menu(event):
     if not is_authorized(event.sender_id):
         return
@@ -580,13 +633,13 @@ async def command_menu(event):
             "🌐 Traducción: **SIEMPRE ESPAÑOL** ✅\n"
             "🚫 Mensajes promocionales: **Bloqueados**\n\n"
             "Usa los botones para controlar el bot.",
-            buttons=get_main_menu_buttons()
+            buttons=get_main_menu_buttons(),
         )
 
     elif command == "/menu":
         await event.respond(
             "🎛 **Panel de Control:**",
-            buttons=get_main_menu_buttons()
+            buttons=get_main_menu_buttons(),
         )
 
     elif command == "/help":
@@ -608,19 +661,15 @@ async def command_menu(event):
         )
 
     elif command == "/status":
-        paused = (
-            "⏸ PAUSADO" if SETTINGS["paused"] else "▶️ ACTIVO"
-        )
+        paused = "⏸ PAUSADO" if SETTINGS["paused"] else "▶️ ACTIVO"
         await event.respond(
             f"📊 **Estado:**\n\n"
             f"• Estado: `{paused}`\n"
             f"• Traducción: `✅ SIEMPRE ESPAÑOL`\n"
             f"• Canal fuente: `{SOURCE_CHANNEL}`\n"
             f"• Canal destino: `{DESTINATION_CHANNEL}`\n"
-            f"• Reemplazos: "
-            f"`{len(SETTINGS['custom_replacements'])}`\n"
-            f"• Palabras bloqueadas: "
-            f"`{len(SETTINGS['blocked_words'])}`"
+            f"• Reemplazos: `{len(SETTINGS['custom_replacements'])}`\n"
+            f"• Palabras bloqueadas: `{len(SETTINGS['blocked_words'])}`"
         )
 
     elif command == "/pause":
@@ -635,12 +684,9 @@ async def command_menu(event):
         try:
             parts = full_text[9:].split(":")
             if len(parts) == 2:
-                old_word = parts[0].strip()
-                new_word = parts[1].strip()
+                old_word, new_word = parts[0].strip(), parts[1].strip()
                 SETTINGS["custom_replacements"][old_word] = new_word
-                await event.respond(
-                    f"✅ `{old_word}` → `{new_word}`"
-                )
+                await event.respond(f"✅ `{old_word}` → `{new_word}`")
             else:
                 await event.respond(
                     "❌ Usa: `/addword palabravieja:nuevapalabra`"
@@ -661,18 +707,12 @@ async def command_menu(event):
     elif command == "/wordlist":
         if SETTINGS["custom_replacements"]:
             replacements = "\n".join(
-                [f"• `{k}` → `{v}`"
-                 for k, v in SETTINGS[
-                     "custom_replacements"
-                 ].items()]
+                f"• `{k}` → `{v}`"
+                for k, v in SETTINGS["custom_replacements"].items()
             )
-            await event.respond(
-                f"📝 **Reemplazos:**\n\n{replacements}"
-            )
+            await event.respond(f"📝 **Reemplazos:**\n\n{replacements}")
         else:
-            await event.respond(
-                "📝 Ninguno. Usa `/addword vieja:nueva`"
-            )
+            await event.respond("📝 Ninguno. Usa `/addword vieja:nueva`")
 
     elif full_text.lower().startswith("/blockword "):
         word = full_text[11:].strip()
@@ -680,7 +720,7 @@ async def command_menu(event):
             SETTINGS["blocked_words"].append(word)
             await event.respond(f"🚫 Bloqueado: `{word}`")
         else:
-            await event.respond(f"⚠️ Ya bloqueado.")
+            await event.respond("⚠️ Ya bloqueado.")
 
     elif full_text.lower().startswith("/unblockword "):
         word = full_text[13:].strip()
@@ -688,16 +728,12 @@ async def command_menu(event):
             SETTINGS["blocked_words"].remove(word)
             await event.respond(f"✅ Desbloqueado: `{word}`")
         else:
-            await event.respond(f"❌ No está en la lista.")
+            await event.respond("❌ No está en la lista.")
 
     elif command == "/blocklist":
         if SETTINGS["blocked_words"]:
-            words = "\n".join(
-                [f"• `{w}`" for w in SETTINGS["blocked_words"]]
-            )
-            await event.respond(
-                f"🚫 **Bloqueadas:**\n\n{words}"
-            )
+            words = "\n".join(f"• `{w}`" for w in SETTINGS["blocked_words"])
+            await event.respond(f"🚫 **Bloqueadas:**\n\n{words}")
         else:
             await event.respond("✅ Ninguna bloqueada.")
 
@@ -711,33 +747,29 @@ async def command_menu(event):
         )
 
 
-# -------------------------------------------------------------------
-# BUTTON HANDLER
-# -------------------------------------------------------------------
+# ===================================================================
+# BUTTON HANDLER (bot_client)
+# ===================================================================
+
 @bot_client.on(events.CallbackQuery())
 async def button_handler(event):
     if not is_authorized(event.sender_id):
         await event.answer("❌ No autorizado", alert=True)
         return
 
-    data = event.data.decode('utf-8')
+    data = event.data.decode("utf-8")
 
     if data == "toggle_pause":
         SETTINGS["paused"] = not SETTINGS["paused"]
-        status = (
-            "⏸ PAUSADO" if SETTINGS["paused"] else "▶️ ACTIVO"
-        )
+        status = "⏸ PAUSADO" if SETTINGS["paused"] else "▶️ ACTIVO"
         await event.answer(f"Bot: {status}")
         await safe_edit(
-            event,
-            "🎛 **Panel de Control:**",
-            buttons=get_main_menu_buttons()
+            event, "🎛 **Panel de Control:**",
+            buttons=get_main_menu_buttons(),
         )
 
     elif data == "show_status":
-        paused = (
-            "⏸ PAUSADO" if SETTINGS["paused"] else "▶️ ACTIVO"
-        )
+        paused = "⏸ PAUSADO" if SETTINGS["paused"] else "▶️ ACTIVO"
         await event.answer("Estado!")
         await safe_edit(
             event,
@@ -746,7 +778,7 @@ async def button_handler(event):
             f"• Traducción: `✅ SIEMPRE ESPAÑOL`\n"
             f"• Fuente: `{SOURCE_CHANNEL}`\n"
             f"• Destino: `{DESTINATION_CHANNEL}`",
-            buttons=[[Button.inline("🔙 Volver", "back_menu")]]
+            buttons=[[Button.inline("🔙 Volver", "back_menu")]],
         )
 
     elif data == "show_channels":
@@ -758,30 +790,29 @@ async def button_handler(event):
             f"• **ID:** `{SOURCE_CHANNEL}`\n\n"
             f"• **Destino:** BREY TRADING FX VIP\n"
             f"• **ID:** `{DESTINATION_CHANNEL}`",
-            buttons=[[Button.inline("🔙 Volver", "back_menu")]]
+            buttons=[[Button.inline("🔙 Volver", "back_menu")]],
         )
 
     elif data == "back_menu":
         await safe_edit(
-            event,
-            "🎛 **Panel de Control:**",
-            buttons=get_main_menu_buttons()
+            event, "🎛 **Panel de Control:**",
+            buttons=get_main_menu_buttons(),
         )
 
     elif data == "close":
         await event.delete()
 
 
-# -------------------------------------------------------------------
-# ALBUM HANDLER
-# -------------------------------------------------------------------
+# ===================================================================
+# ALBUM HANDLER (user_client)
+# ===================================================================
+
 @user_client.on(events.Album(chats=[SOURCE_CHANNEL]))
 async def album_handler(event):
     if SETTINGS["paused"]:
         return
 
-    source_id = event.chat_id
-    destination_id = CHANNEL_MAP.get(source_id)
+    destination_id = CHANNEL_MAP.get(event.chat_id)
     if not destination_id:
         return
 
@@ -799,45 +830,60 @@ async def album_handler(event):
     for msg in event.messages:
         if msg.message:
             raw = msg.message
+
+            # Reject pure error messages immediately
+            if is_pure_error_message(raw):
+                print("⏭️ Skipped album: error message")
+                return
+
             if is_promotional(raw):
                 print("⏭️ Skipped album: promotional")
                 return
+
             if is_blocked_word_found(raw):
                 print("⏭️ Skipped album: blocked word")
                 return
+
             caption = process_message(raw)
+            if caption is None:
+                print("⏭️ Skipped album: nothing valid after processing")
+                return
             break
 
     media_files = [
-        msg.media for msg in event.messages
-        if is_photo_message(msg)
+        msg.media for msg in event.messages if is_photo_message(msg)
     ]
 
     if media_files:
-        try:
+        # Small delay before album sends to avoid rate-limit bursts
+        await asyncio.sleep(0.5)
+
+        async def do_send():
             await user_client.send_file(
-                destination_id,
-                media_files,
-                caption=caption
+                destination_id, media_files, caption=caption
             )
+
+        success = await safe_send(do_send)
+        if success:
             print(f"✅ Album sent → {destination_id}")
-        except Exception as e:
-            print(f"❌ Album failed: {e}")
+        else:
+            print(f"❌ Album dropped after retries")
 
 
-# -------------------------------------------------------------------
-# SINGLE MESSAGE HANDLER
-# -------------------------------------------------------------------
+# ===================================================================
+# SINGLE MESSAGE HANDLER (user_client)
+# ===================================================================
+
 @user_client.on(events.NewMessage(chats=[SOURCE_CHANNEL]))
 async def replication_engine(event):
     if SETTINGS["paused"]:
         return
 
-    source_id = event.chat_id
-    destination_id = CHANNEL_MAP.get(source_id)
+    destination_id = CHANNEL_MAP.get(event.chat_id)
     if not destination_id:
         return
 
+    # Skip album parts (handled by album_handler)
     if event.message.grouped_id:
         return
 
@@ -860,54 +906,65 @@ async def replication_engine(event):
     if not raw_text and not has_media:
         return
 
-    # Block promotional
+    # --- GATE: reject error messages immediately, before any processing ---
+    if raw_text and is_pure_error_message(raw_text):
+        print("⏭️ Skipped: error message from source channel")
+        return
+
     if raw_text and is_promotional(raw_text):
         print("⏭️ Skipped: promotional")
         return
 
-    # Block custom words
     if raw_text and is_blocked_word_found(raw_text):
         print("⏭️ Skipped: blocked word")
         return
 
-    # Text only — must be valid signal
+    # Text-only messages must be valid signals
     if not has_media and raw_text:
         if not is_valid_signal(raw_text):
             print("⏭️ Skipped: not a valid signal")
             return
 
-    # Process: clean → translate to Spanish → sign
     final_text = process_message(raw_text) if raw_text else None
 
-    # Send
-    try:
-        if is_photo:
+    # After processing, if we got None (e.g. was all error text), skip
+    if raw_text and final_text is None:
+        print("⏭️ Skipped: nothing valid remained after processing")
+        return
+
+    # Small delay to avoid bursting the API
+    await asyncio.sleep(0.3)
+
+    if is_photo:
+        async def do_send():
             await user_client.send_file(
-                destination_id,
-                event.message.media,
-                caption=final_text
+                destination_id, event.message.media, caption=final_text
             )
-        elif has_media and not is_photo:
-            if not raw_text:
-                print("⏭️ Skipped: non-photo no text")
-                return
-            await user_client.send_message(
-                destination_id, final_text
-            )
-        else:
-            if not final_text:
-                return
-            await user_client.send_message(
-                destination_id, final_text
-            )
-        print(f"✅ Signal (ES): {source_id} → {destination_id}")
-    except Exception as e:
-        print(f"❌ Delivery failed: {e}")
+    elif has_media and not is_photo:
+        if not raw_text:
+            print("⏭️ Skipped: non-photo no text")
+            return
+
+        async def do_send():
+            await user_client.send_message(destination_id, final_text)
+    else:
+        if not final_text:
+            return
+
+        async def do_send():
+            await user_client.send_message(destination_id, final_text)
+
+    success = await safe_send(do_send)
+    if success:
+        print(f"✅ Signal (ES): {SOURCE_CHANNEL} → {destination_id}")
+    else:
+        print(f"❌ Signal dropped after retries")
 
 
-# -------------------------------------------------------------------
+# ===================================================================
 # MAIN
-# -------------------------------------------------------------------
+# ===================================================================
+
 async def main():
     await user_client.connect()
     if not await user_client.is_user_authorized():
@@ -922,13 +979,14 @@ async def main():
     print("\n🚀 Brey Trading Signal Bot RUNNING!")
     print("🌐 Translation: ALWAYS SPANISH — no exceptions")
     print("🚫 Promotional messages: BLOCKED")
+    print("🛡️  Error 500 messages: BLOCKED at source")
+    print("🔄  Auto-retry on server errors: ENABLED")
     print(f"📡 {SOURCE_CHANNEL} → {DESTINATION_CHANNEL}\n")
 
     await asyncio.gather(
         user_client.run_until_disconnected(),
-        bot_client.run_until_disconnected()
+        bot_client.run_until_disconnected(),
     )
 
 
 asyncio.run(main())
-
