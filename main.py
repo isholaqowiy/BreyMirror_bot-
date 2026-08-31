@@ -393,6 +393,21 @@ def is_blocked_word_found(text):
     return False
 
 
+# These patterns match error sentences that appear inline (no newlines)
+ERROR_INLINE_PATTERNS = [
+    # Matches the full Error 500 block in any form
+    r"Error\s*5\d\d\s*\(Server Error\)[^\n]*?That'?s all we know\.?",
+    r"Error\s*5\d\d\s*\(Server Error\)[^\n]*",
+    r"!!1500\.?That'?s an error\.",
+    r"There was an error\.\s*Please try again later\.",
+    r"Please try again later\.?\s*That'?s all we know\.?",
+    r"That'?s all we know\.?",
+    r"There was an error\.",
+    r"Please try again later\.",
+    r"!!1500",
+]
+
+# These patterns match full lines that are pure error lines
 ERROR_LINE_PATTERNS = [
     r"error\s*5\d\d",
     r"server\s*error",
@@ -401,15 +416,26 @@ ERROR_LINE_PATTERNS = [
     r"try again later",
     r"that'?s all we know",
     r"!!1500",
-    r"1500\.that",
+    r"1500\.?that",
     r"an error\.",
 ]
 
 
 def strip_error_lines(text):
-    """Remove any lines containing error messages from within a signal."""
+    """
+    Remove error messages from signals.
+    Handles both:
+    1. Full lines that are error messages
+    2. Error text embedded inline within a line (no newlines)
+    """
     if not text:
         return text
+
+    # Step 1: Remove inline error patterns first (no newline boundaries)
+    for pattern in ERROR_INLINE_PATTERNS:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+
+    # Step 2: Remove full lines that contain error patterns
     lines = text.split('\n')
     clean_lines = []
     for line in lines:
@@ -421,7 +447,13 @@ def strip_error_lines(text):
                 break
         if not is_error:
             clean_lines.append(line)
-    return '\n'.join(clean_lines)
+
+    result = '\n'.join(clean_lines)
+
+    # Step 3: Clean up any leftover blank lines or artifacts
+    result = re.sub(r'\n{3,}', '\n\n', result)
+    result = result.strip()
+    return result
 
 
 def clean_message(text):
@@ -899,3 +931,4 @@ async def main():
 
 
 asyncio.run(main())
+
