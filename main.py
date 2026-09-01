@@ -205,6 +205,17 @@ GOLD_SIGNAL_PATTERNS = [
     r"maximize profit",
     r"primera entrada",
     r"primera entr",
+    r"second.*entry",
+    r"\bmarket\b",
+    r"\bmercado\b",
+    r"\bpausa\b",
+    r"\bbreak\b",
+    r"let'?s.*take",
+    r"vamos.*tomar",
+    r"\+\d+\s*pips",
+    r"\+\d+\s*puntos",
+    r"tp\d.*hit",
+    r"tp\d.*alcanzado",
     r"50%",
 ]
 
@@ -748,7 +759,8 @@ async def replication_engine(event):
             print("⏭️ Skipped: only error content after stripping")
             return
 
-    # Text only — must be valid signal
+    # Text only (no media) — must be valid signal
+    # Media messages with any text always pass through
     if not has_media and raw_text:
         if not is_valid_signal(raw_text):
             print("⏭️ Skipped: not a valid signal")
@@ -808,4 +820,3 @@ async def main():
 
 
 asyncio.run(main())
-
