@@ -7,7 +7,11 @@ from telethon.tl.types import (
     MessageMediaPhoto,
     MessageMediaDocument,
 )
-from deep_translator import GoogleTranslator
+from telethon.errors import (
+    SessionExpiredError,
+    SessionRevokedError,
+    AuthKeyUnregisteredError,
+)
 
 # --- ENVIRONMENT CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID"))
@@ -46,9 +50,23 @@ WORD_REPLACEMENTS = {
 # --- SIGNATURE ---
 SIGNATURE = "\n\n📊 Brey's Signals | @BREYTRADING"
 
+# --- ERROR TEXTS TO STRIP FROM MESSAGES ---
+ERROR_TEXTS_TO_REMOVE = [
+    r"Error\s*500\s*\(Server Error\)[^\n]*",
+    r"That'?s an error\.[^\n]*",
+    r"There was an error\.[^\n]*",
+    r"Please try again later\.[^\n]*",
+    r"That'?s all we know\.[^\n]*",
+    r"Error\s*\d+[^\n]*",
+    r"Server Error[^\n]*",
+    r"HTTP Error[^\n]*",
+    r"Connection Error[^\n]*",
+    r"Request Failed[^\n]*",
+    r"Timed out[^\n]*",
+]
+
 # --- BLOCKED CONTENT ---
 BLOCKED_PHRASES = [
-    # Generic promotional
     r"join (our|my|the)?\s*(free|vip|premium|channel)",
     r"click (the|this)?\s*link",
     r"subscribe",
@@ -73,13 +91,26 @@ BLOCKED_PHRASES = [
     r"promo",
     r"refer",
     r"invite",
-    # Switzy channel specific spam
+    r"meta\s*(ads|business|campaign)",
+    r"facebook\s*ads",
+    r"campaña",
+    r"anuncio",
+    r"conjunto de anuncios",
+    r"rechazamos tu anuncio",
+    r"errores de conjuntos",
+    r"puntuación de oportunidad",
+    r"resultado potencial",
+    r"nueva campaña",
+    r"suscripcion.*sitio web",
+    r"costo por",
+    r"entrega activada",
+    r"revisar.*anuncio",
     r"switzy",
     r"envíen sus ganancias",
     r"envien sus ganancias",
     r"manda.*ganancias",
     r"send.*ganancias",
-    r"500\s*[£€$£]",
+    r"500\s*[£€$]",
     r"like.*publicacion",
     r"like.*publication",
     r"dale like",
@@ -137,11 +168,9 @@ GOLD_SIGNAL_PATTERNS = [
     r"\bpendientes\b",
     r"\bpips\b",
     r"\bscalp\b",
-    r"price action",
     r"\bsoporte\b",
     r"\bresistencia\b",
     r"\btendencia\b",
-    r"\bimpulso\b",
     r"\banálisis\b",
     r"\balcanzado\b",
     r"\binvalidada\b",
@@ -150,12 +179,18 @@ GOLD_SIGNAL_PATTERNS = [
     r"\bcierra\b",
     r"\bdentro\b",
     r"\bpagando\b",
+    r"close.*position",
+    r"trail.*sl",
+    r"second entry",
+    r"maximize profit",
+    r"primera entrada",
+    r"primera entr",
     r"50%",
 ]
 
 # --- SYSTEM VARIABLES ---
 SETTINGS = {
-    "ai_translate": True,
+    "ai_translate": False,
     "target_language": "es",
     "paused": False,
     "custom_replacements": {},
@@ -231,18 +266,16 @@ def is_noforwards(message):
 
 
 def is_promotional(text):
-    """Check if message is promotional or spam."""
     if not text:
         return False
     for pattern in BLOCKED_PHRASES:
         if re.search(pattern, text, re.IGNORECASE):
-            print(f"🚫 Blocked phrase: {pattern}")
+            print(f"🚫 Blocked: {pattern}")
             return True
     return False
 
 
 def is_valid_signal(text):
-    """Check if message contains valid trading signal content."""
     if not text:
         return False
     for pattern in GOLD_SIGNAL_PATTERNS:
@@ -260,31 +293,35 @@ def is_blocked_word_found(text):
     return False
 
 
-def clean_message(text):
-    """Remove names, links, usernames and normalize text."""
+def remove_error_texts(text):
+    """Strip error messages from source channel posts."""
     if not text:
         return text
-    # Remove source channel names
+    for pattern in ERROR_TEXTS_TO_REMOVE:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    return text
+
+
+def clean_message(text):
+    """Remove names, links, errors. No translation."""
+    if not text:
+        return text
+    text = remove_error_texts(text)
     for pattern in NAMES_TO_REMOVE:
         text = re.sub(pattern, "", text, flags=re.IGNORECASE)
-    # Remove all links
     text = re.sub(
         r'https?://\S+|t\.me/\S+|www\.\S+|joinchat/\S+',
         '', text
     )
-    # Remove leftover @handles
     text = re.sub(r'@\w+', '', text)
-    # Apply word replacements
     for pattern, replacement in WORD_REPLACEMENTS.items():
         text = re.sub(
             pattern, replacement, text, flags=re.IGNORECASE
         )
-    # Apply custom replacements
     for old, new in SETTINGS["custom_replacements"].items():
         text = re.sub(
             re.escape(old), new, text, flags=re.IGNORECASE
         )
-    # Normalize trading terms
     text = re.sub(
         r'\bxauusd\b', 'XAUUSD', text, flags=re.IGNORECASE
     )
@@ -292,16 +329,9 @@ def clean_message(text):
         r'\bxau/usd\b', 'XAU/USD', text, flags=re.IGNORECASE
     )
     text = re.sub(
-        r'\bbuy\b', 'BUY', text, flags=re.IGNORECASE
-    )
-    text = re.sub(
-        r'\bsell\b', 'SELL', text, flags=re.IGNORECASE
-    )
-    text = re.sub(
         r'\btp(\d)\b', r'TP\1', text, flags=re.IGNORECASE
     )
     text = re.sub(r'\bsl\b', 'SL', text, flags=re.IGNORECASE)
-    # Remove lines that are empty after cleaning
     lines = text.split('\n')
     cleaned_lines = [
         line for line in lines
@@ -310,35 +340,16 @@ def clean_message(text):
         )
     ]
     text = '\n'.join(cleaned_lines)
-    # Collapse excess blank lines
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = text.strip()
     return text
 
 
-def translate_text(text):
-    """Translate to target language."""
-    if not text or not SETTINGS["ai_translate"]:
-        return text
-    try:
-        translated = GoogleTranslator(
-            source='auto',
-            target=SETTINGS["target_language"]
-        ).translate(text)
-        return translated if translated else text
-    except Exception as e:
-        print(f"⚠️ Translation error: {e}")
-        return text
-
-
 def process_message(raw_text):
-    """Full pipeline: clean → translate → sign."""
+    """Clean → remove errors → sign."""
     if not raw_text:
         return None
     text = clean_message(raw_text)
-    if not text:
-        return None
-    text = translate_text(text)
     if not text:
         return None
     return text + SIGNATURE
@@ -395,7 +406,6 @@ def get_main_menu_buttons():
 
 
 async def safe_edit(event, text, buttons=None):
-    """Edit message safely ignoring not-modified errors."""
     try:
         if buttons:
             await event.edit(text, buttons=buttons)
@@ -405,7 +415,7 @@ async def safe_edit(event, text, buttons=None):
         if "not modified" in str(e).lower():
             pass
         else:
-            print(f"⚠️ Edit error: {e}")
+            print(f"Edit error: {e}")
 
 
 # -------------------------------------------------------------------
@@ -424,8 +434,9 @@ async def command_menu(event):
             "👋 **Bienvenido a Brey Trading Signal Bot!**\n\n"
             "📡 Copiando señales de Gold automáticamente\n"
             "➡️ Destino: **BREY TRADING FX VIP**\n\n"
-            "🌐 Idioma predeterminado: **Español**\n"
-            "🚫 Mensajes promocionales: **Bloqueados**\n\n"
+            "🚫 Mensajes promocionales: **Bloqueados**\n"
+            "🚫 Textos de error: **Eliminados**\n"
+            "📋 Señales: **Copiadas limpiamente**\n\n"
             "Usa los botones para controlar el bot.",
             buttons=get_main_menu_buttons()
         )
@@ -438,29 +449,24 @@ async def command_menu(event):
 
     elif command == "/help":
         await event.respond(
-            "📋 **Comandos Disponibles:**\n\n"
-            "**🔧 Sistema:**\n"
-            "➡️ `/start` - Bienvenida + menú\n"
+            "📋 **Comandos:**\n\n"
+            "➡️ `/start` - Bienvenida\n"
             "➡️ `/menu` - Panel de control\n"
-            "➡️ `/help` - Todos los comandos\n"
             "➡️ `/status` - Estado actual\n"
-            "➡️ `/channels` - Canales\n\n"
-            "**⏯ Control:**\n"
             "➡️ `/pause` - Pausar bot\n"
-            "➡️ `/resume` - Reanudar bot\n\n"
-            "**🌐 Traducción:**\n"
+            "➡️ `/resume` - Reanudar bot\n"
             "➡️ `/ai on` - Activar traducción\n"
             "➡️ `/ai off` - Desactivar traducción\n"
             "➡️ `/language es` - Español\n"
             "➡️ `/language en` - Inglés\n"
-            "➡️ `/language fr` - Francés\n\n"
-            "**✏️ Palabras:**\n"
             "➡️ `/addword vieja:nueva` - Reemplazar\n"
             "➡️ `/removeword palabra` - Quitar\n"
             "➡️ `/wordlist` - Ver reemplazos\n"
             "➡️ `/blockword palabra` - Bloquear\n"
             "➡️ `/unblockword palabra` - Desbloquear\n"
             "➡️ `/blocklist` - Ver bloqueadas\n"
+            "➡️ `/channels` - Ver canales\n"
+            "➡️ `/ping` - Verificar bot activo\n"
         )
 
     elif command == "/status":
@@ -476,7 +482,7 @@ async def command_menu(event):
             SETTINGS["target_language"]
         )
         await event.respond(
-            f"📊 **Estado del Sistema:**\n\n"
+            f"📊 **Estado:**\n\n"
             f"• Estado: `{paused}`\n"
             f"• Traducción: `{translate}`\n"
             f"• Idioma: `{lang_name}`\n"
@@ -485,7 +491,15 @@ async def command_menu(event):
             f"• Reemplazos: "
             f"`{len(SETTINGS['custom_replacements'])}`\n"
             f"• Palabras bloqueadas: "
-            f"`{len(SETTINGS['blocked_words'])}`"
+            f"`{len(SETTINGS['blocked_words'])}`\n\n"
+            f"✅ Bot funcionando correctamente"
+        )
+
+    elif command == "/ping":
+        await event.respond(
+            "🏓 **Pong!**\n"
+            "✅ Bot activo y funcionando.\n"
+            f"📡 Monitoreando: `{SOURCE_CHANNEL}`"
         )
 
     elif command == "/pause":
@@ -494,7 +508,10 @@ async def command_menu(event):
 
     elif command == "/resume":
         SETTINGS["paused"] = False
-        await event.respond("▶️ **Bot Reanudado.**")
+        await event.respond(
+            "▶️ **Bot Reanudado.**\n"
+            "📡 Copiando señales nuevamente."
+        )
 
     elif command == "/ai on":
         SETTINGS["ai_translate"] = True
@@ -600,10 +617,10 @@ async def command_menu(event):
 
     elif command == "/channels":
         await event.respond(
-            "📡 **Configuración de Canales:**\n\n"
-            f"**Canal Fuente:** Switzy VIP Gold\n"
+            "📡 **Canales:**\n\n"
+            f"**Fuente:** Switzy VIP Gold\n"
             f"**Fuente ID:** `{SOURCE_CHANNEL}`\n\n"
-            f"**Canal Destino:** BREY TRADING FX VIP\n"
+            f"**Destino:** BREY TRADING FX VIP\n"
             f"**Destino ID:** `{DESTINATION_CHANNEL}`"
         )
 
@@ -634,7 +651,7 @@ async def button_handler(event):
     elif data == "change_language":
         await safe_edit(
             event,
-            "🌐 **Selecciona el idioma de las señales:**",
+            "🌐 **Selecciona el idioma:**",
             buttons=get_language_buttons()
         )
 
@@ -649,8 +666,7 @@ async def button_handler(event):
         await event.answer(f"✅ {lang_name}")
         await safe_edit(
             event,
-            f"✅ **Idioma: {lang_name}**\n"
-            f"Señales traducidas a {lang_name}.",
+            f"✅ **Idioma: {lang_name}**",
             buttons=get_language_buttons()
         )
 
@@ -686,7 +702,8 @@ async def button_handler(event):
             f"• Traducción: `{translate}`\n"
             f"• Idioma: `{lang_name}`\n"
             f"• Fuente: `{SOURCE_CHANNEL}`\n"
-            f"• Destino: `{DESTINATION_CHANNEL}`",
+            f"• Destino: `{DESTINATION_CHANNEL}`\n\n"
+            f"✅ Bot funcionando correctamente",
             buttons=[[Button.inline("🔙 Volver", "back_menu")]]
         )
 
@@ -696,9 +713,9 @@ async def button_handler(event):
             event,
             f"📡 **Canales:**\n\n"
             f"• **Fuente:** Switzy VIP Gold\n"
-            f"• **Fuente ID:** `{SOURCE_CHANNEL}`\n\n"
+            f"• **ID:** `{SOURCE_CHANNEL}`\n\n"
             f"• **Destino:** BREY TRADING FX VIP\n"
-            f"• **Destino ID:** `{DESTINATION_CHANNEL}`",
+            f"• **ID:** `{DESTINATION_CHANNEL}`",
             buttons=[[Button.inline("🔙 Volver", "back_menu")]]
         )
 
@@ -801,29 +818,25 @@ async def replication_engine(event):
     if not raw_text and not has_media:
         return
 
-    # Block promotional content
     if raw_text and is_promotional(raw_text):
         print("⏭️ Skipped: promotional")
         return
 
-    # Block custom blocked words
     if raw_text and is_blocked_word_found(raw_text):
         print("⏭️ Skipped: blocked word")
         return
 
-    # For text only messages — must be valid signal
     if not has_media and raw_text:
         if not is_valid_signal(raw_text):
             print("⏭️ Skipped: not a valid signal")
             return
 
-    # For photos — allow with or without caption
-    # (charts often come without text)
-
-    # Process text
     final_text = process_message(raw_text) if raw_text else None
 
-    # Send
+    if raw_text and not final_text:
+        print("⏭️ Skipped: text empty after cleaning")
+        return
+
     try:
         if is_photo:
             await user_client.send_file(
@@ -836,15 +849,13 @@ async def replication_engine(event):
                 print("⏭️ Skipped: non-photo no text")
                 return
             await user_client.send_message(
-                destination_id,
-                final_text
+                destination_id, final_text
             )
         else:
             if not final_text:
                 return
             await user_client.send_message(
-                destination_id,
-                final_text
+                destination_id, final_text
             )
         print(f"✅ Signal: {source_id} → {destination_id}")
     except Exception as e:
@@ -852,28 +863,67 @@ async def replication_engine(event):
 
 
 # -------------------------------------------------------------------
-# MAIN
+# MAIN — with auto-reconnect
 # -------------------------------------------------------------------
 async def main():
+    # Connect userbot
     await user_client.connect()
-    if not await user_client.is_user_authorized():
-        print("❌ ERROR: Session string invalid or expired!")
-        return
-    print("✅ Userbot connected.")
-    print(f"📡 Source: {SOURCE_CHANNEL}")
 
+    # Validate session
+    try:
+        if not await user_client.is_user_authorized():
+            print("❌ ERROR: Session string invalid or expired!")
+            print("Please generate a new session string.")
+            return
+    except (
+        SessionExpiredError,
+        SessionRevokedError,
+        AuthKeyUnregisteredError
+    ) as e:
+        print(f"❌ Session error: {e}")
+        print("Please generate a new session string.")
+        return
+
+    print("✅ Userbot connected and authorized.")
+    print(f"📡 Monitoring source: {SOURCE_CHANNEL}")
+
+    # Start bot
     await bot_client.start(bot_token=BOT_TOKEN)
     print("✅ Bot control panel connected.")
 
     print("\n🚀 Brey Trading Signal Bot RUNNING!")
-    print("🌐 Default: Español (Spanish)")
+    print("📋 Signals copied exactly — no translation")
+    print("🚫 Error texts: REMOVED from messages")
     print("🚫 Promotional messages: BLOCKED")
     print(f"📡 {SOURCE_CHANNEL} → {DESTINATION_CHANNEL}\n")
 
-    await asyncio.gather(
-        user_client.run_until_disconnected(),
-        bot_client.run_until_disconnected()
-    )
+    # Keep both clients alive with auto-reconnect
+    while True:
+        try:
+            await asyncio.gather(
+                user_client.run_until_disconnected(),
+                bot_client.run_until_disconnected()
+            )
+            break
+        except (
+            SessionExpiredError,
+            SessionRevokedError,
+            AuthKeyUnregisteredError
+        ) as e:
+            print(f"❌ Fatal session error: {e}")
+            print("Session expired — please regenerate.")
+            break
+        except Exception as e:
+            print(f"⚠️ Connection dropped: {e}")
+            print("🔄 Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
+            try:
+                await user_client.connect()
+                await bot_client.connect()
+                print("✅ Reconnected successfully.")
+            except Exception as re:
+                print(f"❌ Reconnect failed: {re}")
+                await asyncio.sleep(10)
 
 
 asyncio.run(main())
