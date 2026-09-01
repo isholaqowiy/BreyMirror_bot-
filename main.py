@@ -40,11 +40,16 @@ NAMES_TO_REMOVE = [
 ]
 
 # --- WORD REPLACEMENTS ---
+# Bot output must always be in Spanish. Convert English trading
+# terms to their Spanish equivalents (this is the reverse of what
+# was here before, which incorrectly pushed text toward English).
 WORD_REPLACEMENTS = {
-    r"\bVENDER\b": "SELL",
-    r"\bCOMPRAR\b": "BUY",
-    r"\bVende\b": "SELL",
-    r"\bCompra\b": "BUY",
+    r"\bSELL\b": "VENDER",
+    r"\bBUY\b": "COMPRAR",
+    r"\bSell\b": "Vender",
+    r"\bBuy\b": "Comprar",
+    r"\bsell\b": "vender",
+    r"\bbuy\b": "comprar",
 }
 
 # --- SIGNATURE ---
@@ -189,24 +194,15 @@ GOLD_SIGNAL_PATTERNS = [
 ]
 
 # --- SYSTEM VARIABLES ---
+# Language is locked to Spanish per client requirement — no toggle,
+# no per-message override. ai_translate is left present only in case
+# future logic needs it, but target_language can no longer change.
 SETTINGS = {
     "ai_translate": False,
     "target_language": "es",
     "paused": False,
     "custom_replacements": {},
     "blocked_words": [],
-}
-
-LANGUAGES = {
-    "🇬🇧 English": "en",
-    "🇪🇸 Spanish": "es",
-    "🇫🇷 French": "fr",
-    "🇩🇪 German": "de",
-    "🇧🇷 Portuguese": "pt",
-    "🇸🇦 Arabic": "ar",
-    "🇨🇳 Chinese": "zh",
-    "🇷🇺 Russian": "ru",
-    "🇮🇹 Italian": "it",
 }
 
 print("Starting Brey Trading Signal Bot...")
@@ -303,7 +299,7 @@ def remove_error_texts(text):
 
 
 def clean_message(text):
-    """Remove names, links, errors. No translation."""
+    """Remove names, links, errors. Force Spanish trading terms."""
     if not text:
         return text
     text = remove_error_texts(text)
@@ -332,6 +328,18 @@ def clean_message(text):
         r'\btp(\d)\b', r'TP\1', text, flags=re.IGNORECASE
     )
     text = re.sub(r'\bsl\b', 'SL', text, flags=re.IGNORECASE)
+    # Common English trading phrases -> Spanish, so nothing
+    # slips through to the destination channel in English.
+    text = re.sub(r'\btake profit\b', 'take profit', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bstop loss\b', 'stop loss', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bentry\b', 'entrada', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bbreak even\b', 'punto de equilibrio', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bbreakeven\b', 'punto de equilibrio', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bsecure\b', 'asegurar', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bsignal ready\b', 'señal lista', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bclose position\b', 'cerrar posición', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bsecond entry\b', 'segunda entrada', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bmaximize profit\b', 'maximizar ganancia', text, flags=re.IGNORECASE)
     lines = text.split('\n')
     cleaned_lines = [
         line for line in lines
@@ -346,7 +354,7 @@ def clean_message(text):
 
 
 def process_message(raw_text):
-    """Clean → remove errors → sign."""
+    """Clean → remove errors → force Spanish terms → sign."""
     if not raw_text:
         return None
     text = clean_message(raw_text)
@@ -358,46 +366,12 @@ def process_message(raw_text):
 # -------------------------------------------------------------------
 # MENU HELPERS
 # -------------------------------------------------------------------
-def get_language_buttons():
-    buttons = []
-    row = []
-    for lang_name, lang_code in LANGUAGES.items():
-        current = "✅ " if lang_code == SETTINGS[
-            "target_language"
-        ] else ""
-        row.append(Button.inline(
-            f"{current}{lang_name}", f"lang_{lang_code}"
-        ))
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    buttons.append([Button.inline("🔙 Back", "back_menu")])
-    return buttons
-
-
 def get_main_menu_buttons():
-    translate_status = (
-        "✅ ON" if SETTINGS["ai_translate"] else "🛑 OFF"
-    )
     pause_label = (
         "▶️ Resume" if SETTINGS["paused"] else "⏸ Pause"
     )
-    lang_name = next(
-        (k for k, v in LANGUAGES.items()
-         if v == SETTINGS["target_language"]),
-        SETTINGS["target_language"]
-    )
     return [
-        [Button.inline(
-            f"🌐 Translation: {translate_status}",
-            "toggle_translate"
-        )],
-        [Button.inline(
-            f"🗣 Language: {lang_name}",
-            "change_language"
-        )],
+        [Button.inline("🇪🇸 Idioma: Español (fijo)", "noop")],
         [Button.inline(pause_label, "toggle_pause")],
         [Button.inline("📊 Status", "show_status")],
         [Button.inline("📡 Channels", "show_channels")],
@@ -434,6 +408,7 @@ async def command_menu(event):
             "👋 **Bienvenido a Brey Trading Signal Bot!**\n\n"
             "📡 Copiando señales de Gold automáticamente\n"
             "➡️ Destino: **BREY TRADING FX VIP**\n\n"
+            "🇪🇸 Idioma de salida: **Español (fijo)**\n"
             "🚫 Mensajes promocionales: **Bloqueados**\n"
             "🚫 Textos de error: **Eliminados**\n"
             "📋 Señales: **Copiadas limpiamente**\n\n"
@@ -455,10 +430,6 @@ async def command_menu(event):
             "➡️ `/status` - Estado actual\n"
             "➡️ `/pause` - Pausar bot\n"
             "➡️ `/resume` - Reanudar bot\n"
-            "➡️ `/ai on` - Activar traducción\n"
-            "➡️ `/ai off` - Desactivar traducción\n"
-            "➡️ `/language es` - Español\n"
-            "➡️ `/language en` - Inglés\n"
             "➡️ `/addword vieja:nueva` - Reemplazar\n"
             "➡️ `/removeword palabra` - Quitar\n"
             "➡️ `/wordlist` - Ver reemplazos\n"
@@ -466,26 +437,18 @@ async def command_menu(event):
             "➡️ `/unblockword palabra` - Desbloquear\n"
             "➡️ `/blocklist` - Ver bloqueadas\n"
             "➡️ `/channels` - Ver canales\n"
-            "➡️ `/ping` - Verificar bot activo\n"
+            "➡️ `/ping` - Verificar bot activo\n\n"
+            "🇪🇸 Nota: el idioma de salida está fijo en Español."
         )
 
     elif command == "/status":
         paused = (
             "⏸ PAUSADO" if SETTINGS["paused"] else "▶️ ACTIVO"
         )
-        translate = (
-            "✅ ON" if SETTINGS["ai_translate"] else "🛑 OFF"
-        )
-        lang_name = next(
-            (k for k, v in LANGUAGES.items()
-             if v == SETTINGS["target_language"]),
-            SETTINGS["target_language"]
-        )
         await event.respond(
             f"📊 **Estado:**\n\n"
             f"• Estado: `{paused}`\n"
-            f"• Traducción: `{translate}`\n"
-            f"• Idioma: `{lang_name}`\n"
+            f"• Idioma: `Español (fijo)`\n"
             f"• Canal fuente: `{SOURCE_CHANNEL}`\n"
             f"• Canal destino: `{DESTINATION_CHANNEL}`\n"
             f"• Reemplazos: "
@@ -512,38 +475,6 @@ async def command_menu(event):
             "▶️ **Bot Reanudado.**\n"
             "📡 Copiando señales nuevamente."
         )
-
-    elif command == "/ai on":
-        SETTINGS["ai_translate"] = True
-        lang_name = next(
-            (k for k, v in LANGUAGES.items()
-             if v == SETTINGS["target_language"]),
-            SETTINGS["target_language"]
-        )
-        await event.respond(
-            f"✅ **Traducción ACTIVADA** → `{lang_name}`"
-        )
-
-    elif command == "/ai off":
-        SETTINGS["ai_translate"] = False
-        await event.respond("🛑 **Traducción DESACTIVADA.**")
-
-    elif command.startswith("/language "):
-        lang = command.split("/language ")[1].strip()
-        if lang in LANGUAGES.values():
-            SETTINGS["target_language"] = lang
-            lang_name = next(
-                (k for k, v in LANGUAGES.items() if v == lang),
-                lang
-            )
-            await event.respond(
-                f"🌐 **Idioma: {lang_name}**"
-            )
-        else:
-            await event.respond(
-                f"❌ No soportado: `{lang}`\n"
-                f"Opciones: en, es, fr, de, pt, ar, zh, ru, it"
-            )
 
     elif full_text.lower().startswith("/addword "):
         try:
@@ -618,7 +549,6 @@ async def command_menu(event):
     elif command == "/channels":
         await event.respond(
             "📡 **Canales:**\n\n"
-            f"**Fuente:** Switzy VIP Gold\n"
             f"**Fuente ID:** `{SOURCE_CHANNEL}`\n\n"
             f"**Destino:** BREY TRADING FX VIP\n"
             f"**Destino ID:** `{DESTINATION_CHANNEL}`"
@@ -636,39 +566,8 @@ async def button_handler(event):
 
     data = event.data.decode('utf-8')
 
-    if data == "toggle_translate":
-        SETTINGS["ai_translate"] = not SETTINGS["ai_translate"]
-        status = (
-            "✅ ON" if SETTINGS["ai_translate"] else "🛑 OFF"
-        )
-        await event.answer(f"Traducción: {status}")
-        await safe_edit(
-            event,
-            "🎛 **Panel de Control:**",
-            buttons=get_main_menu_buttons()
-        )
-
-    elif data == "change_language":
-        await safe_edit(
-            event,
-            "🌐 **Selecciona el idioma:**",
-            buttons=get_language_buttons()
-        )
-
-    elif data.startswith("lang_"):
-        lang_code = data.replace("lang_", "")
-        SETTINGS["target_language"] = lang_code
-        lang_name = next(
-            (k for k, v in LANGUAGES.items()
-             if v == lang_code),
-            lang_code
-        )
-        await event.answer(f"✅ {lang_name}")
-        await safe_edit(
-            event,
-            f"✅ **Idioma: {lang_name}**",
-            buttons=get_language_buttons()
-        )
+    if data == "noop":
+        await event.answer("El idioma está fijo en Español.")
 
     elif data == "toggle_pause":
         SETTINGS["paused"] = not SETTINGS["paused"]
@@ -686,21 +585,12 @@ async def button_handler(event):
         paused = (
             "⏸ PAUSADO" if SETTINGS["paused"] else "▶️ ACTIVO"
         )
-        translate = (
-            "✅ ON" if SETTINGS["ai_translate"] else "🛑 OFF"
-        )
-        lang_name = next(
-            (k for k, v in LANGUAGES.items()
-             if v == SETTINGS["target_language"]),
-            SETTINGS["target_language"]
-        )
         await event.answer("Estado!")
         await safe_edit(
             event,
             f"📊 **Estado:**\n\n"
             f"• Estado: `{paused}`\n"
-            f"• Traducción: `{translate}`\n"
-            f"• Idioma: `{lang_name}`\n"
+            f"• Idioma: `Español (fijo)`\n"
             f"• Fuente: `{SOURCE_CHANNEL}`\n"
             f"• Destino: `{DESTINATION_CHANNEL}`\n\n"
             f"✅ Bot funcionando correctamente",
@@ -712,10 +602,9 @@ async def button_handler(event):
         await safe_edit(
             event,
             f"📡 **Canales:**\n\n"
-            f"• **Fuente:** Switzy VIP Gold\n"
-            f"• **ID:** `{SOURCE_CHANNEL}`\n\n"
+            f"• **ID Fuente:** `{SOURCE_CHANNEL}`\n\n"
             f"• **Destino:** BREY TRADING FX VIP\n"
-            f"• **ID:** `{DESTINATION_CHANNEL}`",
+            f"• **ID Destino:** `{DESTINATION_CHANNEL}`",
             buttons=[[Button.inline("🔙 Volver", "back_menu")]]
         )
 
@@ -863,13 +752,48 @@ async def replication_engine(event):
 
 
 # -------------------------------------------------------------------
-# MAIN — with auto-reconnect
+# MAIN — with resilient, independent auto-reconnect for both clients
 # -------------------------------------------------------------------
-async def main():
-    # Connect userbot
-    await user_client.connect()
+async def run_client_forever(client, name, start_kwargs=None):
+    """Keep a single client connected indefinitely. Runs its own
+    retry loop so a drop in one client never blocks or delays the
+    other — signals keep flowing the instant the source posts."""
+    backoff = 5
+    while True:
+        try:
+            if not client.is_connected():
+                await client.connect()
 
-    # Validate session
+            if start_kwargs is not None:
+                await client.start(**start_kwargs)
+            else:
+                if not await client.is_user_authorized():
+                    print(f"❌ ERROR: {name} session invalid/expired!")
+                    print("Please generate a new session string.")
+                    return
+
+            print(f"✅ {name} connected.")
+            backoff = 5  # reset backoff after a clean connect
+            await client.run_until_disconnected()
+            print(f"⚠️ {name} disconnected. Reconnecting immediately...")
+
+        except (
+            SessionExpiredError,
+            SessionRevokedError,
+            AuthKeyUnregisteredError,
+        ) as e:
+            print(f"❌ Fatal session error on {name}: {e}")
+            print("Session expired — please regenerate.")
+            return
+        except Exception as e:
+            print(f"⚠️ {name} connection error: {e}")
+            print(f"🔄 Retrying {name} in {backoff} seconds...")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+
+async def main():
+    await user_client.connect()
     try:
         if not await user_client.is_user_authorized():
             print("❌ ERROR: Session string invalid or expired!")
@@ -878,7 +802,7 @@ async def main():
     except (
         SessionExpiredError,
         SessionRevokedError,
-        AuthKeyUnregisteredError
+        AuthKeyUnregisteredError,
     ) as e:
         print(f"❌ Session error: {e}")
         print("Please generate a new session string.")
@@ -887,43 +811,24 @@ async def main():
     print("✅ Userbot connected and authorized.")
     print(f"📡 Monitoring source: {SOURCE_CHANNEL}")
 
-    # Start bot
     await bot_client.start(bot_token=BOT_TOKEN)
     print("✅ Bot control panel connected.")
 
     print("\n🚀 Brey Trading Signal Bot RUNNING!")
-    print("📋 Signals copied exactly — no translation")
+    print("📋 Signals copied — output forced to Spanish")
     print("🚫 Error texts: REMOVED from messages")
     print("🚫 Promotional messages: BLOCKED")
     print(f"📡 {SOURCE_CHANNEL} → {DESTINATION_CHANNEL}\n")
 
-    # Keep both clients alive with auto-reconnect
-    while True:
-        try:
-            await asyncio.gather(
-                user_client.run_until_disconnected(),
-                bot_client.run_until_disconnected()
-            )
-            break
-        except (
-            SessionExpiredError,
-            SessionRevokedError,
-            AuthKeyUnregisteredError
-        ) as e:
-            print(f"❌ Fatal session error: {e}")
-            print("Session expired — please regenerate.")
-            break
-        except Exception as e:
-            print(f"⚠️ Connection dropped: {e}")
-            print("🔄 Reconnecting in 5 seconds...")
-            await asyncio.sleep(5)
-            try:
-                await user_client.connect()
-                await bot_client.connect()
-                print("✅ Reconnected successfully.")
-            except Exception as re:
-                print(f"❌ Reconnect failed: {re}")
-                await asyncio.sleep(10)
+    # Each client gets its own independent forever-loop so a
+    # reconnect on one never stalls delivery on the other — the
+    # bot effectively never rests.
+    await asyncio.gather(
+        run_client_forever(user_client, "Userbot"),
+        run_client_forever(
+            bot_client, "Bot", start_kwargs={"bot_token": BOT_TOKEN}
+        ),
+    )
 
 
 asyncio.run(main())
