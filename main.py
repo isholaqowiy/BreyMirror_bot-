@@ -35,57 +35,20 @@ NAMES_TO_REMOVE = [
     r"www\.\S+",
 ]
 
-# --- TRADING TERMS TO PROTECT FROM TRANSLATION ---
-PRESERVE_TERMS = {
-    "XAUUSD":      "__XAUUSD__",
-    "XAU/USD":     "__XAUUSD2__",
-    "XAU":         "__XAU__",
-    "TP1":         "__TP1__",
-    "TP2":         "__TP2__",
-    "TP3":         "__TP3__",
-    "TP4":         "__TP4__",
-    "TP5":         "__TP5__",
-    "SL":          "__SL__",
-    "BUY":         "__BUY__",
-    "SELL":        "__SELL__",
-    "SCALP":       "__SCALP__",
-    "SCALPING":    "__SCALPING__",
-    "BREAKEVEN":   "__BREAKEVEN__",
-    "BREAK EVEN":  "__BREAKEVEN2__",
-    "PIPS":        "__PIPS__",
-    "PIP":         "__PIP__",
+# --- WORD REPLACEMENTS ---
+WORD_REPLACEMENTS = {
+    r"\bVENDER\b": "SELL",
+    r"\bCOMPRAR\b": "BUY",
+    r"\bVende\b": "SELL",
+    r"\bCompra\b": "BUY",
 }
-RESTORE_TERMS = {v: k for k, v in PRESERVE_TERMS.items()}
 
 # --- SIGNATURE ---
 SIGNATURE = "\n\n📊 Brey's Signals | @BREYTRADING"
 
-# --- ERROR TEXT TO REMOVE FROM MESSAGES ---
-ERROR_INLINE_PATTERNS = [
-    r"Error\s*5\d\d\s*\(Server Error\)!!1500[^\n]*?That'?s all we know\.?",
-    r"Error\s*5\d\d\s*\(Server Error\)[^\n]*",
-    r"!!1500\.?That'?s an error\.",
-    r"There was an error\.\s*Please try again later\.",
-    r"Please try again later\.?\s*That'?s all we know\.?",
-    r"That'?s all we know\.?",
-    r"There was an error\.",
-    r"Please try again later\.",
-    r"!!1500",
-]
-
-ERROR_LINE_PATTERNS = [
-    r"error\s*5\d\d",
-    r"server\s*error",
-    r"there was an error",
-    r"please try again",
-    r"try again later",
-    r"that'?s all we know",
-    r"!!1500",
-    r"1500\.?that",
-]
-
 # --- BLOCKED CONTENT ---
 BLOCKED_PHRASES = [
+    # Generic promotional
     r"join (our|my|the)?\s*(free|vip|premium|channel)",
     r"click (the|this)?\s*link",
     r"subscribe",
@@ -110,27 +73,13 @@ BLOCKED_PHRASES = [
     r"promo",
     r"refer",
     r"invite",
-    r"meta\s*(ads|business|campaign)",
-    r"facebook\s*ads",
-    r"campaña",
-    r"anuncio",
-    r"conjunto de anuncios",
-    r"rechazamos tu anuncio",
-    r"errores de conjuntos",
-    r"puntuación de oportunidad",
-    r"resultado potencial",
-    r"nueva campaña",
-    r"interacción",
-    r"suscripcion.*sitio web",
-    r"costo por",
-    r"entrega activada",
-    r"revisar.*anuncio",
+    # Switzy channel specific spam
     r"switzy",
     r"envíen sus ganancias",
     r"envien sus ganancias",
     r"manda.*ganancias",
     r"send.*ganancias",
-    r"500\s*[£€$]",
+    r"500\s*[£€$£]",
     r"like.*publicacion",
     r"like.*publication",
     r"dale like",
@@ -188,9 +137,11 @@ GOLD_SIGNAL_PATTERNS = [
     r"\bpendientes\b",
     r"\bpips\b",
     r"\bscalp\b",
+    r"price action",
     r"\bsoporte\b",
     r"\bresistencia\b",
     r"\btendencia\b",
+    r"\bimpulso\b",
     r"\banálisis\b",
     r"\balcanzado\b",
     r"\binvalidada\b",
@@ -199,31 +150,28 @@ GOLD_SIGNAL_PATTERNS = [
     r"\bcierra\b",
     r"\bdentro\b",
     r"\bpagando\b",
-    r"close.*position",
-    r"trail.*sl",
-    r"second entry",
-    r"maximize profit",
-    r"primera entrada",
-    r"primera entr",
-    r"second.*entry",
-    r"\bmarket\b",
-    r"\bmercado\b",
-    r"\bpausa\b",
-    r"\bbreak\b",
-    r"let'?s.*take",
-    r"vamos.*tomar",
-    r"\+\d+\s*pips",
-    r"\+\d+\s*puntos",
-    r"tp\d.*hit",
-    r"tp\d.*alcanzado",
     r"50%",
 ]
 
 # --- SYSTEM VARIABLES ---
 SETTINGS = {
+    "ai_translate": True,
+    "target_language": "es",
     "paused": False,
     "custom_replacements": {},
     "blocked_words": [],
+}
+
+LANGUAGES = {
+    "🇬🇧 English": "en",
+    "🇪🇸 Spanish": "es",
+    "🇫🇷 French": "fr",
+    "🇩🇪 German": "de",
+    "🇧🇷 Portuguese": "pt",
+    "🇸🇦 Arabic": "ar",
+    "🇨🇳 Chinese": "zh",
+    "🇷🇺 Russian": "ru",
+    "🇮🇹 Italian": "it",
 }
 
 print("Starting Brey Trading Signal Bot...")
@@ -232,105 +180,6 @@ user_client = TelegramClient(
     StringSession(SESSION_STRING), API_ID, API_HASH
 )
 bot_client = TelegramClient(StringSession(), API_ID, API_HASH)
-
-
-# -------------------------------------------------------------------
-# TRANSLATION — ALWAYS SPANISH, NO EXCEPTIONS
-# -------------------------------------------------------------------
-def protect_terms(text):
-    for term, placeholder in PRESERVE_TERMS.items():
-        pattern = re.compile(re.escape(term), re.IGNORECASE)
-        text = pattern.sub(placeholder, text)
-    return text
-
-
-def restore_terms(text):
-    for placeholder, term in RESTORE_TERMS.items():
-        text = text.replace(placeholder, term)
-    return text
-
-
-def translate_to_spanish(text):
-    if not text or not text.strip():
-        return text
-    try:
-        protected = protect_terms(text)
-        lines = protected.split('\n')
-        translated_lines = []
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                translated_lines.append('')
-                continue
-            if re.match(r'^[\d\s\.\-\+\:\%\_\_]+$', stripped):
-                translated_lines.append(line)
-                continue
-            if all(
-                word.startswith('__') and word.endswith('__')
-                for word in stripped.split() if word
-            ):
-                translated_lines.append(line)
-                continue
-            try:
-                translator = GoogleTranslator(source='auto', target='es')
-                translated_line = translator.translate(stripped)
-                translated_lines.append(
-                    translated_line if translated_line else stripped
-                )
-            except Exception:
-                translated_lines.append(line)
-        result = '\n'.join(translated_lines)
-        result = restore_terms(result)
-        # Normalize trading terms
-        result = re.sub(r'\bxauusd\b', 'XAUUSD', result, flags=re.IGNORECASE)
-        result = re.sub(r'\bxau/usd\b', 'XAU/USD', result, flags=re.IGNORECASE)
-        result = re.sub(r'\btp(\d)\b', r'TP\1', result, flags=re.IGNORECASE)
-        result = re.sub(r'\bsl\b', 'SL', result, flags=re.IGNORECASE)
-        print("✅ Translated to Spanish")
-        return result
-    except Exception as e:
-        print(f"⚠️ Translation error: {e} — using original")
-        return text
-
-
-def apply_spanish_fixes(text):
-    if not text:
-        return text
-    text = re.sub(r'\bBUY\b', 'COMPRAR', text)
-    text = re.sub(r'\bSELL\b', 'VENDER', text)
-    text = re.sub(r'\bComprar\b', 'COMPRAR', text)
-    text = re.sub(r'\bVender\b', 'VENDER', text)
-    text = re.sub(r'\bxauusd\b', 'XAUUSD', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bxau/usd\b', 'XAU/USD', text, flags=re.IGNORECASE)
-    text = re.sub(r'\btp(\d)\b', r'TP\1', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bsl\b', 'SL', text, flags=re.IGNORECASE)
-    return text
-
-
-# -------------------------------------------------------------------
-# ERROR STRIPPING
-# -------------------------------------------------------------------
-def strip_error_lines(text):
-    if not text:
-        return text
-    # Remove inline error blobs first
-    for pattern in ERROR_INLINE_PATTERNS:
-        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
-    # Remove full lines containing error patterns
-    lines = text.split('\n')
-    clean_lines = []
-    for line in lines:
-        is_error = False
-        for pattern in ERROR_LINE_PATTERNS:
-            if re.search(pattern, line, re.IGNORECASE):
-                print(f"🧹 Stripped error line: {line.strip()}")
-                is_error = True
-                break
-        if not is_error:
-            clean_lines.append(line)
-    result = '\n'.join(clean_lines)
-    result = re.sub(r'\n{3,}', '\n\n', result)
-    return result.strip()
 
 
 # -------------------------------------------------------------------
@@ -382,16 +231,18 @@ def is_noforwards(message):
 
 
 def is_promotional(text):
+    """Check if message is promotional or spam."""
     if not text:
         return False
     for pattern in BLOCKED_PHRASES:
         if re.search(pattern, text, re.IGNORECASE):
-            print(f"🚫 Blocked: {pattern}")
+            print(f"🚫 Blocked phrase: {pattern}")
             return True
     return False
 
 
 def is_valid_signal(text):
+    """Check if message contains valid trading signal content."""
     if not text:
         return False
     for pattern in GOLD_SIGNAL_PATTERNS:
@@ -410,66 +261,141 @@ def is_blocked_word_found(text):
 
 
 def clean_message(text):
-    """Strip errors → remove watermarks/links → custom replacements → normalize."""
+    """Remove names, links, usernames and normalize text."""
     if not text:
         return text
-    # Step 0: Strip error lines/blobs
-    text = strip_error_lines(text)
-    # Step 1: Remove source channel names
+    # Remove source channel names
     for pattern in NAMES_TO_REMOVE:
         text = re.sub(pattern, "", text, flags=re.IGNORECASE)
-    # Step 2: Remove all links
+    # Remove all links
     text = re.sub(
-        r'https?://\S+|t\.me/\S+|www\.\S+|joinchat/\S+', '', text
+        r'https?://\S+|t\.me/\S+|www\.\S+|joinchat/\S+',
+        '', text
     )
-    # Step 3: Remove leftover @handles
+    # Remove leftover @handles
     text = re.sub(r'@\w+', '', text)
-    # Step 4: Apply custom replacements
+    # Apply word replacements
+    for pattern, replacement in WORD_REPLACEMENTS.items():
+        text = re.sub(
+            pattern, replacement, text, flags=re.IGNORECASE
+        )
+    # Apply custom replacements
     for old, new in SETTINGS["custom_replacements"].items():
-        text = re.sub(re.escape(old), new, text, flags=re.IGNORECASE)
-    # Step 5: Clean blank lines
+        text = re.sub(
+            re.escape(old), new, text, flags=re.IGNORECASE
+        )
+    # Normalize trading terms
+    text = re.sub(
+        r'\bxauusd\b', 'XAUUSD', text, flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r'\bxau/usd\b', 'XAU/USD', text, flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r'\bbuy\b', 'BUY', text, flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r'\bsell\b', 'SELL', text, flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r'\btp(\d)\b', r'TP\1', text, flags=re.IGNORECASE
+    )
+    text = re.sub(r'\bsl\b', 'SL', text, flags=re.IGNORECASE)
+    # Remove lines that are empty after cleaning
     lines = text.split('\n')
     cleaned_lines = [
         line for line in lines
-        if line.strip() and not re.match(r'^[\s\-_•|/\\:.]+$', line.strip())
+        if line.strip() and not re.match(
+            r'^[\s\-_•|/\\:.]+$', line.strip()
+        )
     ]
     text = '\n'.join(cleaned_lines)
+    # Collapse excess blank lines
     text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
+    text = text.strip()
+    return text
+
+
+def translate_text(text):
+    """Translate to target language."""
+    if not text or not SETTINGS["ai_translate"]:
+        return text
+    try:
+        translated = GoogleTranslator(
+            source='auto',
+            target=SETTINGS["target_language"]
+        ).translate(text)
+        return translated if translated else text
+    except Exception as e:
+        print(f"⚠️ Translation error: {e}")
+        return text
 
 
 def process_message(raw_text):
-    """Clean → Translate to Spanish → Fix terms → Sign."""
+    """Full pipeline: clean → translate → sign."""
     if not raw_text:
         return None
-    # Step 1: Clean watermarks, errors, links
     text = clean_message(raw_text)
     if not text:
         return None
-    # Step 2: ALWAYS translate to Spanish
-    text = translate_to_spanish(text)
+    text = translate_text(text)
     if not text:
         return None
-    # Step 3: Post-translation Spanish fixes
-    text = apply_spanish_fixes(text)
-    # Step 4: Sign
     return text + SIGNATURE
 
 
 # -------------------------------------------------------------------
 # MENU HELPERS
 # -------------------------------------------------------------------
+def get_language_buttons():
+    buttons = []
+    row = []
+    for lang_name, lang_code in LANGUAGES.items():
+        current = "✅ " if lang_code == SETTINGS[
+            "target_language"
+        ] else ""
+        row.append(Button.inline(
+            f"{current}{lang_name}", f"lang_{lang_code}"
+        ))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([Button.inline("🔙 Back", "back_menu")])
+    return buttons
+
+
 def get_main_menu_buttons():
-    pause_label = "▶️ Reanudar" if SETTINGS["paused"] else "⏸ Pausar"
+    translate_status = (
+        "✅ ON" if SETTINGS["ai_translate"] else "🛑 OFF"
+    )
+    pause_label = (
+        "▶️ Resume" if SETTINGS["paused"] else "⏸ Pause"
+    )
+    lang_name = next(
+        (k for k, v in LANGUAGES.items()
+         if v == SETTINGS["target_language"]),
+        SETTINGS["target_language"]
+    )
     return [
+        [Button.inline(
+            f"🌐 Translation: {translate_status}",
+            "toggle_translate"
+        )],
+        [Button.inline(
+            f"🗣 Language: {lang_name}",
+            "change_language"
+        )],
         [Button.inline(pause_label, "toggle_pause")],
-        [Button.inline("📊 Estado", "show_status")],
-        [Button.inline("📡 Canales", "show_channels")],
-        [Button.inline("❌ Cerrar", "close")],
+        [Button.inline("📊 Status", "show_status")],
+        [Button.inline("📡 Channels", "show_channels")],
+        [Button.inline("❌ Close", "close")],
     ]
 
 
 async def safe_edit(event, text, buttons=None):
+    """Edit message safely ignoring not-modified errors."""
     try:
         if buttons:
             await event.edit(text, buttons=buttons)
@@ -479,7 +405,7 @@ async def safe_edit(event, text, buttons=None):
         if "not modified" in str(e).lower():
             pass
         else:
-            print(f"Edit error: {e}")
+            print(f"⚠️ Edit error: {e}")
 
 
 # -------------------------------------------------------------------
@@ -498,9 +424,8 @@ async def command_menu(event):
             "👋 **Bienvenido a Brey Trading Signal Bot!**\n\n"
             "📡 Copiando señales de Gold automáticamente\n"
             "➡️ Destino: **BREY TRADING FX VIP**\n\n"
-            "🌐 Traducción: **SIEMPRE ESPAÑOL** ✅\n"
-            "🚫 Mensajes promocionales: **Bloqueados**\n"
-            "🚫 Textos de error: **Eliminados**\n\n"
+            "🌐 Idioma predeterminado: **Español**\n"
+            "🚫 Mensajes promocionales: **Bloqueados**\n\n"
             "Usa los botones para controlar el bot.",
             buttons=get_main_menu_buttons()
         )
@@ -513,32 +438,54 @@ async def command_menu(event):
 
     elif command == "/help":
         await event.respond(
-            "📋 **Comandos:**\n\n"
-            "➡️ `/start` - Bienvenida\n"
+            "📋 **Comandos Disponibles:**\n\n"
+            "**🔧 Sistema:**\n"
+            "➡️ `/start` - Bienvenida + menú\n"
             "➡️ `/menu` - Panel de control\n"
+            "➡️ `/help` - Todos los comandos\n"
             "➡️ `/status` - Estado actual\n"
+            "➡️ `/channels` - Canales\n\n"
+            "**⏯ Control:**\n"
             "➡️ `/pause` - Pausar bot\n"
-            "➡️ `/resume` - Reanudar bot\n"
-            "➡️ `/addword vieja:nueva` - Reemplazar palabra\n"
-            "➡️ `/removeword palabra` - Quitar reemplazo\n"
+            "➡️ `/resume` - Reanudar bot\n\n"
+            "**🌐 Traducción:**\n"
+            "➡️ `/ai on` - Activar traducción\n"
+            "➡️ `/ai off` - Desactivar traducción\n"
+            "➡️ `/language es` - Español\n"
+            "➡️ `/language en` - Inglés\n"
+            "➡️ `/language fr` - Francés\n\n"
+            "**✏️ Palabras:**\n"
+            "➡️ `/addword vieja:nueva` - Reemplazar\n"
+            "➡️ `/removeword palabra` - Quitar\n"
             "➡️ `/wordlist` - Ver reemplazos\n"
-            "➡️ `/blockword palabra` - Bloquear palabra\n"
+            "➡️ `/blockword palabra` - Bloquear\n"
             "➡️ `/unblockword palabra` - Desbloquear\n"
             "➡️ `/blocklist` - Ver bloqueadas\n"
-            "➡️ `/channels` - Ver canales\n\n"
-            "🌐 **Traducción:** Siempre Español — no configurable"
         )
 
     elif command == "/status":
-        paused = "⏸ PAUSADO" if SETTINGS["paused"] else "▶️ ACTIVO"
+        paused = (
+            "⏸ PAUSADO" if SETTINGS["paused"] else "▶️ ACTIVO"
+        )
+        translate = (
+            "✅ ON" if SETTINGS["ai_translate"] else "🛑 OFF"
+        )
+        lang_name = next(
+            (k for k, v in LANGUAGES.items()
+             if v == SETTINGS["target_language"]),
+            SETTINGS["target_language"]
+        )
         await event.respond(
-            f"📊 **Estado:**\n\n"
+            f"📊 **Estado del Sistema:**\n\n"
             f"• Estado: `{paused}`\n"
-            f"• Traducción: `✅ SIEMPRE ESPAÑOL`\n"
+            f"• Traducción: `{translate}`\n"
+            f"• Idioma: `{lang_name}`\n"
             f"• Canal fuente: `{SOURCE_CHANNEL}`\n"
             f"• Canal destino: `{DESTINATION_CHANNEL}`\n"
-            f"• Reemplazos: `{len(SETTINGS['custom_replacements'])}`\n"
-            f"• Palabras bloqueadas: `{len(SETTINGS['blocked_words'])}`"
+            f"• Reemplazos: "
+            f"`{len(SETTINGS['custom_replacements'])}`\n"
+            f"• Palabras bloqueadas: "
+            f"`{len(SETTINGS['blocked_words'])}`"
         )
 
     elif command == "/pause":
@@ -549,6 +496,38 @@ async def command_menu(event):
         SETTINGS["paused"] = False
         await event.respond("▶️ **Bot Reanudado.**")
 
+    elif command == "/ai on":
+        SETTINGS["ai_translate"] = True
+        lang_name = next(
+            (k for k, v in LANGUAGES.items()
+             if v == SETTINGS["target_language"]),
+            SETTINGS["target_language"]
+        )
+        await event.respond(
+            f"✅ **Traducción ACTIVADA** → `{lang_name}`"
+        )
+
+    elif command == "/ai off":
+        SETTINGS["ai_translate"] = False
+        await event.respond("🛑 **Traducción DESACTIVADA.**")
+
+    elif command.startswith("/language "):
+        lang = command.split("/language ")[1].strip()
+        if lang in LANGUAGES.values():
+            SETTINGS["target_language"] = lang
+            lang_name = next(
+                (k for k, v in LANGUAGES.items() if v == lang),
+                lang
+            )
+            await event.respond(
+                f"🌐 **Idioma: {lang_name}**"
+            )
+        else:
+            await event.respond(
+                f"❌ No soportado: `{lang}`\n"
+                f"Opciones: en, es, fr, de, pt, ar, zh, ru, it"
+            )
+
     elif full_text.lower().startswith("/addword "):
         try:
             parts = full_text[9:].split(":")
@@ -556,11 +535,17 @@ async def command_menu(event):
                 old_word = parts[0].strip()
                 new_word = parts[1].strip()
                 SETTINGS["custom_replacements"][old_word] = new_word
-                await event.respond(f"✅ `{old_word}` → `{new_word}`")
+                await event.respond(
+                    f"✅ `{old_word}` → `{new_word}`"
+                )
             else:
-                await event.respond("❌ Usa: `/addword palabravieja:nuevapalabra`")
+                await event.respond(
+                    "❌ Usa: `/addword palabravieja:nuevapalabra`"
+                )
         except Exception:
-            await event.respond("❌ Usa: `/addword palabravieja:nuevapalabra`")
+            await event.respond(
+                "❌ Usa: `/addword palabravieja:nuevapalabra`"
+            )
 
     elif full_text.lower().startswith("/removeword "):
         word = full_text[12:].strip()
@@ -573,11 +558,18 @@ async def command_menu(event):
     elif command == "/wordlist":
         if SETTINGS["custom_replacements"]:
             replacements = "\n".join(
-                [f"• `{k}` → `{v}`" for k, v in SETTINGS["custom_replacements"].items()]
+                [f"• `{k}` → `{v}`"
+                 for k, v in SETTINGS[
+                     "custom_replacements"
+                 ].items()]
             )
-            await event.respond(f"📝 **Reemplazos:**\n\n{replacements}")
+            await event.respond(
+                f"📝 **Reemplazos:**\n\n{replacements}"
+            )
         else:
-            await event.respond("📝 Ninguno. Usa `/addword vieja:nueva`")
+            await event.respond(
+                "📝 Ninguno. Usa `/addword vieja:nueva`"
+            )
 
     elif full_text.lower().startswith("/blockword "):
         word = full_text[11:].strip()
@@ -597,17 +589,21 @@ async def command_menu(event):
 
     elif command == "/blocklist":
         if SETTINGS["blocked_words"]:
-            words = "\n".join([f"• `{w}`" for w in SETTINGS["blocked_words"]])
-            await event.respond(f"🚫 **Bloqueadas:**\n\n{words}")
+            words = "\n".join(
+                [f"• `{w}`" for w in SETTINGS["blocked_words"]]
+            )
+            await event.respond(
+                f"🚫 **Bloqueadas:**\n\n{words}"
+            )
         else:
             await event.respond("✅ Ninguna bloqueada.")
 
     elif command == "/channels":
         await event.respond(
-            "📡 **Canales:**\n\n"
-            f"**Fuente:** Switzy VIP Gold\n"
+            "📡 **Configuración de Canales:**\n\n"
+            f"**Canal Fuente:** Switzy VIP Gold\n"
             f"**Fuente ID:** `{SOURCE_CHANNEL}`\n\n"
-            f"**Destino:** BREY TRADING FX VIP\n"
+            f"**Canal Destino:** BREY TRADING FX VIP\n"
             f"**Destino ID:** `{DESTINATION_CHANNEL}`"
         )
 
@@ -623,20 +619,72 @@ async def button_handler(event):
 
     data = event.data.decode('utf-8')
 
-    if data == "toggle_pause":
+    if data == "toggle_translate":
+        SETTINGS["ai_translate"] = not SETTINGS["ai_translate"]
+        status = (
+            "✅ ON" if SETTINGS["ai_translate"] else "🛑 OFF"
+        )
+        await event.answer(f"Traducción: {status}")
+        await safe_edit(
+            event,
+            "🎛 **Panel de Control:**",
+            buttons=get_main_menu_buttons()
+        )
+
+    elif data == "change_language":
+        await safe_edit(
+            event,
+            "🌐 **Selecciona el idioma de las señales:**",
+            buttons=get_language_buttons()
+        )
+
+    elif data.startswith("lang_"):
+        lang_code = data.replace("lang_", "")
+        SETTINGS["target_language"] = lang_code
+        lang_name = next(
+            (k for k, v in LANGUAGES.items()
+             if v == lang_code),
+            lang_code
+        )
+        await event.answer(f"✅ {lang_name}")
+        await safe_edit(
+            event,
+            f"✅ **Idioma: {lang_name}**\n"
+            f"Señales traducidas a {lang_name}.",
+            buttons=get_language_buttons()
+        )
+
+    elif data == "toggle_pause":
         SETTINGS["paused"] = not SETTINGS["paused"]
-        status = "⏸ PAUSADO" if SETTINGS["paused"] else "▶️ ACTIVO"
+        status = (
+            "⏸ PAUSADO" if SETTINGS["paused"] else "▶️ ACTIVO"
+        )
         await event.answer(f"Bot: {status}")
-        await safe_edit(event, "🎛 **Panel de Control:**", buttons=get_main_menu_buttons())
+        await safe_edit(
+            event,
+            "🎛 **Panel de Control:**",
+            buttons=get_main_menu_buttons()
+        )
 
     elif data == "show_status":
-        paused = "⏸ PAUSADO" if SETTINGS["paused"] else "▶️ ACTIVO"
+        paused = (
+            "⏸ PAUSADO" if SETTINGS["paused"] else "▶️ ACTIVO"
+        )
+        translate = (
+            "✅ ON" if SETTINGS["ai_translate"] else "🛑 OFF"
+        )
+        lang_name = next(
+            (k for k, v in LANGUAGES.items()
+             if v == SETTINGS["target_language"]),
+            SETTINGS["target_language"]
+        )
         await event.answer("Estado!")
         await safe_edit(
             event,
             f"📊 **Estado:**\n\n"
             f"• Estado: `{paused}`\n"
-            f"• Traducción: `✅ SIEMPRE ESPAÑOL`\n"
+            f"• Traducción: `{translate}`\n"
+            f"• Idioma: `{lang_name}`\n"
             f"• Fuente: `{SOURCE_CHANNEL}`\n"
             f"• Destino: `{DESTINATION_CHANNEL}`",
             buttons=[[Button.inline("🔙 Volver", "back_menu")]]
@@ -648,14 +696,18 @@ async def button_handler(event):
             event,
             f"📡 **Canales:**\n\n"
             f"• **Fuente:** Switzy VIP Gold\n"
-            f"• **ID:** `{SOURCE_CHANNEL}`\n\n"
+            f"• **Fuente ID:** `{SOURCE_CHANNEL}`\n\n"
             f"• **Destino:** BREY TRADING FX VIP\n"
-            f"• **ID:** `{DESTINATION_CHANNEL}`",
+            f"• **Destino ID:** `{DESTINATION_CHANNEL}`",
             buttons=[[Button.inline("🔙 Volver", "back_menu")]]
         )
 
     elif data == "back_menu":
-        await safe_edit(event, "🎛 **Panel de Control:**", buttons=get_main_menu_buttons())
+        await safe_edit(
+            event,
+            "🎛 **Panel de Control:**",
+            buttons=get_main_menu_buttons()
+        )
 
     elif data == "close":
         await event.delete()
@@ -697,11 +749,18 @@ async def album_handler(event):
             caption = process_message(raw)
             break
 
-    media_files = [msg.media for msg in event.messages if is_photo_message(msg)]
+    media_files = [
+        msg.media for msg in event.messages
+        if is_photo_message(msg)
+    ]
 
     if media_files:
         try:
-            await user_client.send_file(destination_id, media_files, caption=caption)
+            await user_client.send_file(
+                destination_id,
+                media_files,
+                caption=caption
+            )
             print(f"✅ Album sent → {destination_id}")
         except Exception as e:
             print(f"❌ Album failed: {e}")
@@ -742,53 +801,52 @@ async def replication_engine(event):
     if not raw_text and not has_media:
         return
 
-    # Block promotional
+    # Block promotional content
     if raw_text and is_promotional(raw_text):
         print("⏭️ Skipped: promotional")
         return
 
-    # Block custom words
+    # Block custom blocked words
     if raw_text and is_blocked_word_found(raw_text):
         print("⏭️ Skipped: blocked word")
         return
 
-    # Strip errors from raw text BEFORE signal validation
-    if raw_text:
-        raw_text = strip_error_lines(raw_text)
-        if not raw_text.strip():
-            print("⏭️ Skipped: only error content after stripping")
-            return
-
-    # Text only (no media) — must be valid signal
-    # Media messages with any text always pass through
+    # For text only messages — must be valid signal
     if not has_media and raw_text:
         if not is_valid_signal(raw_text):
             print("⏭️ Skipped: not a valid signal")
             return
 
-    # Process: clean → translate to Spanish → sign
-    final_text = process_message(raw_text) if raw_text else None
+    # For photos — allow with or without caption
+    # (charts often come without text)
 
-    if raw_text and not final_text:
-        print("⏭️ Skipped: empty after processing")
-        return
+    # Process text
+    final_text = process_message(raw_text) if raw_text else None
 
     # Send
     try:
         if is_photo:
             await user_client.send_file(
-                destination_id, event.message.media, caption=final_text
+                destination_id,
+                event.message.media,
+                caption=final_text
             )
         elif has_media and not is_photo:
             if not raw_text:
                 print("⏭️ Skipped: non-photo no text")
                 return
-            await user_client.send_message(destination_id, final_text)
+            await user_client.send_message(
+                destination_id,
+                final_text
+            )
         else:
             if not final_text:
                 return
-            await user_client.send_message(destination_id, final_text)
-        print(f"✅ Signal (ES): {source_id} → {destination_id}")
+            await user_client.send_message(
+                destination_id,
+                final_text
+            )
+        print(f"✅ Signal: {source_id} → {destination_id}")
     except Exception as e:
         print(f"❌ Delivery failed: {e}")
 
@@ -808,8 +866,7 @@ async def main():
     print("✅ Bot control panel connected.")
 
     print("\n🚀 Brey Trading Signal Bot RUNNING!")
-    print("🌐 Translation: ALWAYS SPANISH — no exceptions")
-    print("🚫 Error texts: STRIPPED before sending")
+    print("🌐 Default: Español (Spanish)")
     print("🚫 Promotional messages: BLOCKED")
     print(f"📡 {SOURCE_CHANNEL} → {DESTINATION_CHANNEL}\n")
 
