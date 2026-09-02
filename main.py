@@ -330,16 +330,26 @@ def clean_message(text):
     text = re.sub(r'\bsl\b', 'SL', text, flags=re.IGNORECASE)
     # Common English trading phrases -> Spanish, so nothing
     # slips through to the destination channel in English.
-    text = re.sub(r'\btake profit\b', 'take profit', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bstop loss\b', 'stop loss', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bentry\b', 'entrada', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bbreak even\b', 'punto de equilibrio', text, flags=re.IGNORECASE)
+    # Multi-word phrases first to avoid partial-match conflicts.
+    text = re.sub(r'\btrail\s+sl\s+to\s+maximize\s+profits?\b', 'Mover SL para maximizar ganancias', text, flags=re.IGNORECASE)
+    text = re.sub(r'\btrail\s+sl\b', 'Mover SL', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bto\s+maximize\s+profits?\b', 'para maximizar ganancias', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bfirst\s+entry\b', 'primera entrada', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bsecond\s+entry\b', 'segunda entrada', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bthird\s+entry\b', 'tercera entrada', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bclose\s+position\b', 'cerrar posición', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bbreak\s+even\b', 'punto de equilibrio', text, flags=re.IGNORECASE)
     text = re.sub(r'\bbreakeven\b', 'punto de equilibrio', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bsignal\s+ready\b', 'señal lista', text, flags=re.IGNORECASE)
+    text = re.sub(r'\btake\s*profit\b', 'tomar ganancias', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bstop\s*loss\b', 'stop loss', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bmaximize\s+profits?\b', 'maximizar ganancias', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bentry\b', 'entrada', text, flags=re.IGNORECASE)
     text = re.sub(r'\bsecure\b', 'asegurar', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bsignal ready\b', 'señal lista', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bclose position\b', 'cerrar posición', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bsecond entry\b', 'segunda entrada', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bmaximize profit\b', 'maximizar ganancia', text, flags=re.IGNORECASE)
+    # Ordinal signal labels → Spanish (after multi-word phrases above)
+    text = re.sub(r'\bFIRST\b', 'PRIMERA', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bSECOND\b', 'SEGUNDA', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bTHIRD\b', 'TERCERA', text, flags=re.IGNORECASE)
     lines = text.split('\n')
     cleaned_lines = [
         line for line in lines
@@ -832,3 +842,4 @@ async def main():
 
 
 asyncio.run(main())
+
