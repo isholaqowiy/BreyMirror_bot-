@@ -12,6 +12,8 @@ from telethon.errors import (
     SessionRevokedError,
     AuthKeyUnregisteredError,
 )
+from deep_translator import GoogleTranslator
+from deep_translator.exceptions import NotValidPayload, TranslationNotFound
 
 # --- ENVIRONMENT CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID"))
@@ -40,9 +42,9 @@ NAMES_TO_REMOVE = [
 ]
 
 # --- WORD REPLACEMENTS ---
-# Bot output must always be in Spanish. Convert English trading
-# terms to their Spanish equivalents (this is the reverse of what
-# was here before, which incorrectly pushed text toward English).
+# Bot output must always be in Spanish. These act as a fast
+# safety-net pass AFTER the AI translation step below, in case
+# the translator leaves a term untranslated or phrases it oddly.
 WORD_REPLACEMENTS = {
     r"\bSELL\b": "VENDER",
     r"\bBUY\b": "COMPRAR",
@@ -195,10 +197,12 @@ GOLD_SIGNAL_PATTERNS = [
 
 # --- SYSTEM VARIABLES ---
 # Language is locked to Spanish per client requirement — no toggle,
-# no per-message override. ai_translate is left present only in case
-# future logic needs it, but target_language can no longer change.
+# no per-message override. Output translation now runs through
+# deep-translator (Google Translate) for anything the regex rules
+# don't anticipate, with the regex rules applied afterward as a
+# safety net / normalizer for trading-specific terms.
 SETTINGS = {
-    "ai_translate": False,
+    "ai_translate": True,
     "target_language": "es",
     "paused": False,
     "custom_replacements": {},
@@ -211,6 +215,25 @@ user_client = TelegramClient(
     StringSession(SESSION_STRING), API_ID, API_HASH
 )
 bot_client = TelegramClient(StringSession(), API_ID, API_HASH)
+
+# Reused across calls; deep_translator instances are lightweight.
+_translator = GoogleTranslator(source="auto", target="es")
+
+# Tokens we never want handed to the translator, since it can
+# mangle tickers/prices/emojis or "translate" things that should
+# stay literal. These are pulled out before translation and
+# stitched back in afterward.
+_PROTECT_PATTERNS = [
+    r"XAU/?USD",
+    r"\bTP\s*\d\b",
+    r"\bSL\b",
+    r"@\w+",
+    r"https?://\S+",
+    r"\d{1,3}(?:[.,]\d+)?",
+]
+_PROTECT_RE = re.compile(
+    "|".join(_PROTECT_PATTERNS), flags=re.IGNORECASE
+)
 
 
 # -------------------------------------------------------------------
@@ -298,8 +321,68 @@ def remove_error_texts(text):
     return text
 
 
+def _has_letters(s):
+    return bool(re.search(r"[A-Za-zÀ-ÿ]", s))
+
+
+def translate_line_to_spanish(line):
+    """Translate a single line to Spanish via deep-translator,
+    protecting tickers/prices/handles/links from being touched.
+    Falls back to the original line on any failure so a network
+    hiccup never blocks message delivery."""
+    stripped = line.strip()
+    if not stripped or not _has_letters(stripped):
+        return line
+
+    # Pull out tokens that must not be translated, replace with
+    # placeholders, translate, then restore them.
+    protected = []
+
+    def _stash(match):
+        protected.append(match.group(0))
+        return f"§{len(protected) - 1}§"
+
+    placeholder_text = _PROTECT_RE.sub(_stash, stripped)
+
+    try:
+        translated = _translator.translate(placeholder_text)
+        if not translated:
+            return line
+    except (NotValidPayload, TranslationNotFound):
+        return line
+    except Exception as e:
+        print(f"⚠️ Translation failed for line, keeping original: {e}")
+        return line
+
+    # Restore protected tokens back into the translated text.
+    def _restore(match):
+        idx = int(match.group(1))
+        return protected[idx] if idx < len(protected) else match.group(0)
+
+    translated = re.sub(r"§(\d+)§", _restore, translated)
+
+    # Preserve original leading/trailing whitespace of the line.
+    leading = line[: len(line) - len(line.lstrip())]
+    trailing = line[len(line.rstrip()):]
+    return f"{leading}{translated}{trailing}"
+
+
+def translate_to_spanish(text):
+    """Translate any remaining English (or other language) content
+    to Spanish, line by line, so message structure/line breaks are
+    preserved. Runs before the regex trading-term safety net."""
+    if not text:
+        return text
+    if not SETTINGS.get("ai_translate", True):
+        return text
+    lines = text.split('\n')
+    translated_lines = [translate_line_to_spanish(line) for line in lines]
+    return '\n'.join(translated_lines)
+
+
 def clean_message(text):
-    """Remove names, links, errors. Force Spanish trading terms."""
+    """Remove names, links, errors. Translate to Spanish, then
+    force-fix trading jargon via regex as a safety net."""
     if not text:
         return text
     text = remove_error_texts(text)
@@ -310,6 +393,16 @@ def clean_message(text):
         '', text
     )
     text = re.sub(r'@\w+', '', text)
+
+    # --- AI TRANSLATION PASS ---
+    # Catches any English phrasing the regex rules below don't
+    # anticipate (new slang, emphasis like "Let's FUCKN GOO",
+    # unusual sentence structure, casual commentary, etc.)
+    text = translate_to_spanish(text)
+
+    # --- REGEX SAFETY NET ---
+    # Normalizes trading-specific terms/formatting after
+    # translation, in case the translator phrases them oddly.
     for pattern, replacement in WORD_REPLACEMENTS.items():
         text = re.sub(
             pattern, replacement, text, flags=re.IGNORECASE
@@ -329,7 +422,8 @@ def clean_message(text):
     )
     text = re.sub(r'\bsl\b', 'SL', text, flags=re.IGNORECASE)
     # Common English trading phrases -> Spanish, so nothing
-    # slips through to the destination channel in English.
+    # slips through to the destination channel in English, even
+    # if the translation pass above missed something.
     # Multi-word phrases first to avoid partial-match conflicts.
     text = re.sub(r'\btrail\s+sl\s+to\s+maximize\s+profits?\b', 'Mover SL para maximizar ganancias', text, flags=re.IGNORECASE)
     text = re.sub(r'\btrail\s+sl\b', 'Mover SL', text, flags=re.IGNORECASE)
@@ -338,6 +432,7 @@ def clean_message(text):
     text = re.sub(r'\bsecond\s+entry\b', 'segunda entrada', text, flags=re.IGNORECASE)
     text = re.sub(r'\bthird\s+entry\b', 'tercera entrada', text, flags=re.IGNORECASE)
     text = re.sub(r'\bclose\s+position\b', 'cerrar posición', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bclose\b', 'cerrar', text, flags=re.IGNORECASE)
     text = re.sub(r'\bbreak\s+even\b', 'punto de equilibrio', text, flags=re.IGNORECASE)
     text = re.sub(r'\bbreakeven\b', 'punto de equilibrio', text, flags=re.IGNORECASE)
     text = re.sub(r'\bsignal\s+ready\b', 'señal lista', text, flags=re.IGNORECASE)
@@ -346,6 +441,12 @@ def clean_message(text):
     text = re.sub(r'\bmaximize\s+profits?\b', 'maximizar ganancias', text, flags=re.IGNORECASE)
     text = re.sub(r'\bentry\b', 'entrada', text, flags=re.IGNORECASE)
     text = re.sub(r'\bsecure\b', 'asegurar', text, flags=re.IGNORECASE)
+    text = re.sub(r"\bthat'?s\b", 'eso son', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bbanked\b', 'aseguradas', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bhits\b', 'alcanzado', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bmove\b', 'mover', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bposition\b', 'posición', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bon\b', 'en', text, flags=re.IGNORECASE)
     # Ordinal signal labels → Spanish (after multi-word phrases above)
     text = re.sub(r'\bFIRST\b', 'PRIMERA', text, flags=re.IGNORECASE)
     text = re.sub(r'\bSECOND\b', 'SEGUNDA', text, flags=re.IGNORECASE)
@@ -364,7 +465,7 @@ def clean_message(text):
 
 
 def process_message(raw_text):
-    """Clean → remove errors → force Spanish terms → sign."""
+    """Clean → remove errors → translate/force Spanish terms → sign."""
     if not raw_text:
         return None
     text = clean_message(raw_text)
@@ -419,6 +520,7 @@ async def command_menu(event):
             "📡 Copiando señales de Gold automáticamente\n"
             "➡️ Destino: **BREY TRADING FX VIP**\n\n"
             "🇪🇸 Idioma de salida: **Español (fijo)**\n"
+            "🤖 Traducción: **Automática (Google Translate)**\n"
             "🚫 Mensajes promocionales: **Bloqueados**\n"
             "🚫 Textos de error: **Eliminados**\n"
             "📋 Señales: **Copiadas limpiamente**\n\n"
@@ -448,7 +550,9 @@ async def command_menu(event):
             "➡️ `/blocklist` - Ver bloqueadas\n"
             "➡️ `/channels` - Ver canales\n"
             "➡️ `/ping` - Verificar bot activo\n\n"
-            "🇪🇸 Nota: el idioma de salida está fijo en Español."
+            "🇪🇸 Nota: el idioma de salida está fijo en Español,\n"
+            "traducido automáticamente con respaldo de reglas\n"
+            "para términos de trading."
         )
 
     elif command == "/status":
@@ -459,6 +563,7 @@ async def command_menu(event):
             f"📊 **Estado:**\n\n"
             f"• Estado: `{paused}`\n"
             f"• Idioma: `Español (fijo)`\n"
+            f"• Traducción automática: `{'ON' if SETTINGS['ai_translate'] else 'OFF'}`\n"
             f"• Canal fuente: `{SOURCE_CHANNEL}`\n"
             f"• Canal destino: `{DESTINATION_CHANNEL}`\n"
             f"• Reemplazos: "
@@ -826,6 +931,7 @@ async def main():
 
     print("\n🚀 Brey Trading Signal Bot RUNNING!")
     print("📋 Signals copied — output forced to Spanish")
+    print("🤖 Auto-translation: Google Translate + regex safety net")
     print("🚫 Error texts: REMOVED from messages")
     print("🚫 Promotional messages: BLOCKED")
     print(f"📡 {SOURCE_CHANNEL} → {DESTINATION_CHANNEL}\n")
