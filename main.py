@@ -3,7 +3,7 @@ import re
 import sys
 import fcntl
 import asyncio
-from collections import deque
+from collections import deque, OrderedDict
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from telethon.tl.types import (
@@ -37,12 +37,8 @@ CHANNEL_MAP = {
 # ---------------------------------------------------------------------------
 # SINGLE-INSTANCE LOCK
 # ---------------------------------------------------------------------------
-# If this bot gets deployed/restarted while an older process is still
-# alive, both processes read the same source channel and BOTH post to
-# the destination channel -> duplicate messages, sometimes each with a
-# different translation, plus session instability ("works sometimes,
-# not others"). This lock guarantees only one process can run at a
-# time on a given machine.
+# Prevents two copies of this bot running at once on the same machine
+# (which causes duplicate/garbled delivery and session instability).
 _LOCK_PATH = "/tmp/brey_signal_bot.lock"
 _lock_file = open(_LOCK_PATH, "w")
 try:
@@ -78,7 +74,7 @@ WORD_REPLACEMENTS = {
 # --- SIGNATURE ---
 SIGNATURE = "\n\n📊 Brey's Signals | @BREYTRADING"
 
-# --- ERROR TEXTS TO STRIP ---
+# --- ERROR TEXTS TO STRIP FROM SOURCE MESSAGES ---
 ERROR_TEXTS_TO_REMOVE = [
     r"Error\s*500\s*\(Server Error\)[^\n]*",
     r"That'?s an error\.[^\n]*",
@@ -92,6 +88,37 @@ ERROR_TEXTS_TO_REMOVE = [
     r"Request Failed[^\n]*",
     r"Timed out[^\n]*",
 ]
+
+# --- SIGNATURES THAT MEAN "THE TRANSLATOR ITSELF FAILED", NOT A REAL
+# --- TRANSLATION. When Google's free translate endpoint is
+# --- overloaded/rate-limited it can return an HTML/text error page
+# --- INSTEAD OF raising an exception — deep_translator then happily
+# --- hands that back as if it were a successful translation. This is
+# --- exactly what leaked into the destination channel as literal
+# --- "Error 500 (Server Error)..." text. Any translator result that
+# --- matches one of these is treated as a failed call, never as
+# --- real content.
+TRANSLATE_ERROR_SIGNATURES = [
+    r"error\s*\d{3}",
+    r"server error",
+    r"that'?s an error",
+    r"there was an error",
+    r"please try again later",
+    r"that'?s all we know",
+    r"too many requests",
+    r"rate limit",
+    r"bad gateway",
+    r"service unavailable",
+    r"internal server error",
+]
+_TRANSLATE_ERROR_RE = re.compile(
+    "|".join(TRANSLATE_ERROR_SIGNATURES), flags=re.IGNORECASE
+)
+
+
+def _looks_like_translation_error(text):
+    return bool(text) and bool(_TRANSLATE_ERROR_RE.search(text))
+
 
 # --- BLOCKED CONTENT ---
 BLOCKED_PHRASES = [
@@ -163,9 +190,6 @@ BLOCKED_PHRASES = [
 ]
 
 # --- VALID SIGNAL PATTERNS ---
-# Intentionally broad so TP1/TP2/TP3/TP4 updates, SL hit notices,
-# break-even instructions, and follow-up commentary on an existing
-# signal are ALL captured — not just the first "BUY/SELL" message.
 GOLD_SIGNAL_PATTERNS = [
     r"\bxauusd\b",
     r"\bxau/usd\b",
@@ -215,12 +239,14 @@ GOLD_SIGNAL_PATTERNS = [
     r"\balcanzado\b",
     r"\binvalidada\b",
     r"\bcorriendo\b",
+    r"\brunning\b",
     r"\bseguimos\b",
     r"\bcierra\b",
     r"\bdentro\b",
     r"\bpagando\b",
     r"close.*position",
     r"close first",
+    r"close fully",
     r"onto next",
     r"next opportunity",
     r"maximize profit",
@@ -251,9 +277,6 @@ bot_client = TelegramClient(StringSession(), API_ID, API_HASH)
 # ---------------------------------------------------------------------------
 # TRANSLATION ENGINE
 # ---------------------------------------------------------------------------
-# Tokens that must NEVER be handed to a machine translator: quoted
-# strategy labels ("SCALP" etc — Google previously turned this into
-# "cuero cabelludo"), tickers, TP/SL labels, prices, handles, links.
 _PROTECT_PATTERNS = [
     r'"[^"]*"',            # quoted labels e.g. "SCALP"
     r"XAU/?USD",
@@ -268,13 +291,6 @@ _PROTECT_RE = re.compile(
     "|".join(_PROTECT_PATTERNS), flags=re.IGNORECASE
 )
 
-# Deterministic, always-correct translations for the exact phrases
-# this channel repeats constantly. Applied BEFORE the machine
-# translator so these are never left to chance / mistranslated —
-# this is what was going wrong before ("Trail SL to maximize
-# profits" -> "Ruta SL para maximizar los beneficios", "SCALP" ->
-# "cuero cabelludo"). Longer/multi-word phrases are listed first so
-# they take priority over the generic single-word rules below them.
 PRE_TRANSLATE_PHRASES = [
     (r'\btrail\s+sl\s+to\s+maximize\s+profits?\b', 'mover sl para maximizar ganancias'),
     (r'\btrail\s+sl\b', 'mover sl'),
@@ -286,6 +302,9 @@ PRE_TRANSLATE_PHRASES = [
     (r'\bclose\s+first\s+position\b', 'cerrar primera posición'),
     (r'\bclose\s+second\s+position\b', 'cerrar segunda posición'),
     (r'\bclose\s+position\b', 'cerrar posición'),
+    (r'\bclose\s+fully\s+now\b', 'cerrar completamente ahora'),
+    (r'\bclose\s+fully\b', 'cerrar completamente'),
+    (r'\bfully\b', 'completamente'),
     (r'\bbreak\s*even\b', 'punto de equilibrio'),
     (r'\bsl\s+hit\b', 'sl alcanzado'),
     (r'\bonto\s+next\s+opportunity\b', 'a la siguiente oportunidad'),
@@ -298,6 +317,11 @@ PRE_TRANSLATE_PHRASES = [
     (r'\bsecure\b', 'asegurar'),
     (r'\bbanked\b', 'aseguradas'),
     (r"\bthat'?s\b", 'eso son'),
+    (r'\brunning\b', 'corriendo'),
+    (r'\brisk\s+free\b', 'libre de riesgo'),
+    (r'\bconsidering\s+this\s+a\s+separate\s+trade\b', 'considerando esto una operación separada'),
+    (r'\bseparate\s+trade\b', 'operación separada'),
+    (r'\balready\s+having\b', 'ya teniendo'),
     (r'\bhits\b', 'alcanzado'),
     (r'\bhit\b', 'alcanzado'),
     (r'\bpositions\b', 'posiciones'),
@@ -313,9 +337,6 @@ PRE_TRANSLATE_PHRASES = [
 
 
 def _case_preserve_replace(replacement):
-    """Return a re.sub callback that mirrors the matched text's
-    case style (ALL CAPS / Title Case / lower case) onto the
-    Spanish replacement, so signal formatting stays consistent."""
     def _repl(match):
         matched = match.group(0)
         if matched.isupper():
@@ -330,34 +351,72 @@ def _has_letters(s):
     return bool(re.search(r"[A-Za-zÀ-ÿ]", s))
 
 
+# Cap how many Google Translate calls run at once, bot-wide. Firing
+# every line of every message at once was likely what pushed Google's
+# free endpoint into rate-limiting us and returning error pages.
+_TRANSLATE_SEMAPHORE = asyncio.Semaphore(3)
+
+# Small bounded cache so an identical recurring line (common in these
+# channels — the same template phrases repeat constantly) doesn't
+# need a fresh network call every single time.
+_TRANSLATION_CACHE = OrderedDict()
+_TRANSLATION_CACHE_MAX = 500
+
+
+def _cache_get(key):
+    if key in _TRANSLATION_CACHE:
+        _TRANSLATION_CACHE.move_to_end(key)
+        return _TRANSLATION_CACHE[key]
+    return None
+
+
+def _cache_set(key, value):
+    _TRANSLATION_CACHE[key] = value
+    _TRANSLATION_CACHE.move_to_end(key)
+    if len(_TRANSLATION_CACHE) > _TRANSLATION_CACHE_MAX:
+        _TRANSLATION_CACHE.popitem(last=False)
+
+
 def _translate_sync(text_to_translate):
-    """Blocking network call — always run via asyncio.to_thread,
-    never directly inside an async handler (that would freeze the
-    whole bot, including delivery of the NEXT signal, while waiting
-    on Google)."""
+    """Blocking network call — always run via asyncio.to_thread."""
     return GoogleTranslator(source="auto", target="es").translate(
         text_to_translate
     )
 
 
-async def _translate_async(text_to_translate, timeout=8.0):
-    """Non-blocking, timed translation call. Never lets a slow or
-    hung network request stall the event loop or drop a message —
-    on timeout/failure it simply returns None and the caller keeps
-    whatever text it already had."""
-    try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(_translate_sync, text_to_translate),
-            timeout=timeout,
-        )
-    except asyncio.TimeoutError:
-        print("⚠️ Translation timed out — keeping best-effort text for this line.")
-        return None
-    except (NotValidPayload, TranslationNotFound):
-        return None
-    except Exception as e:
-        print(f"⚠️ Translation failed — keeping best-effort text: {e}")
-        return None
+async def _translate_async(text_to_translate, timeout=8.0, max_attempts=2):
+    """Non-blocking, timed, retried, and VALIDATED translation call.
+    Never returns an error page as if it were a translation — if the
+    result looks like a failure signature, it's discarded and
+    retried, and if all attempts fail, returns None so the caller
+    falls back to safe (dictionary-only) text instead of garbage."""
+    for attempt in range(1, max_attempts + 1):
+        result = None
+        try:
+            async with _TRANSLATE_SEMAPHORE:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(_translate_sync, text_to_translate),
+                    timeout=timeout,
+                )
+        except asyncio.TimeoutError:
+            print(f"⚠️ Translation timed out (attempt {attempt}/{max_attempts}).")
+        except (NotValidPayload, TranslationNotFound):
+            return None
+        except Exception as e:
+            print(f"⚠️ Translation error (attempt {attempt}/{max_attempts}): {e}")
+
+        if result and _looks_like_translation_error(result):
+            print("⚠️ Translator returned an error page instead of a "
+                  "translation — discarding and retrying.")
+            result = None
+
+        if result and result.strip():
+            return result
+
+        if attempt < max_attempts:
+            await asyncio.sleep(1.5 * attempt)
+
+    return None
 
 
 async def translate_line_to_spanish(line):
@@ -365,9 +424,7 @@ async def translate_line_to_spanish(line):
     if not stripped or not _has_letters(stripped):
         return line
 
-    # Step 1: deterministic phrase dictionary FIRST, while words like
-    # "SL"/"TP1" are still plain text and can be matched inside phrases
-    # such as "trail sl to maximize profits".
+    # Step 1: deterministic phrase dictionary first.
     working = stripped
     for pattern, replacement in PRE_TRANSLATE_PHRASES:
         working = re.sub(
@@ -383,15 +440,29 @@ async def translate_line_to_spanish(line):
         return f"§{len(protected) - 1}§"
 
     placeholder_text = _PROTECT_RE.sub(_stash, working)
+    expected_tokens = {f"§{i}§" for i in range(len(protected))}
 
     # Step 3: only call the translator if there's real translatable
-    # content left (saves calls and avoids re-translating pure
-    # tickers/numbers/labels).
+    # content left, and only trust the result if EVERY protected
+    # token is still present afterward (if Google drops/mangles a
+    # placeholder, whatever was next to it gets silently lost — this
+    # is what turned "Tp3 running +180 pips" into just "TP3").
     remaining = re.sub(r"§\d+§", "", placeholder_text)
     if _has_letters(remaining):
-        translated = await _translate_async(placeholder_text)
-        if not translated or not translated.strip():
-            translated = placeholder_text
+        cached = _cache_get(placeholder_text)
+        if cached is not None:
+            translated = cached
+        else:
+            raw = await _translate_async(placeholder_text)
+            found_tokens = set(re.findall(r"§\d+§", raw)) if raw else set()
+            if raw and raw.strip() and found_tokens == expected_tokens:
+                translated = raw
+                _cache_set(placeholder_text, translated)
+            else:
+                if raw:
+                    print("⚠️ Translation lost/altered protected tokens — "
+                          "using safe fallback text instead.")
+                translated = placeholder_text
     else:
         translated = placeholder_text
 
@@ -408,10 +479,6 @@ async def translate_line_to_spanish(line):
 
 
 async def translate_to_spanish(text):
-    """Translate every line of a message IN PARALLEL (not one at a
-    time) so a multi-line signal doesn't wait on N sequential network
-    round-trips — this is a big part of what was making delivery slow
-    and occasionally causing missed messages."""
     if not text:
         return text
     if not SETTINGS.get("ai_translate", True):
@@ -508,7 +575,8 @@ def remove_error_texts(text):
 
 
 async def clean_message(text):
-    """Remove names/links/errors → translate → normalize."""
+    """Remove names/links/errors → translate → normalize → scrub
+    error text AGAIN as a final defense-in-depth pass."""
     if not text:
         return text
 
@@ -523,8 +591,12 @@ async def clean_message(text):
     )
     text = re.sub(r'@\w+', '', text)
 
-    # Translate (async, non-blocking, parallel per line).
+    # Translate (async, non-blocking, throttled, validated).
     text = await translate_to_spanish(text)
+
+    # Defense in depth: strip any translator-error text that might
+    # still have slipped through, even after per-line validation.
+    text = remove_error_texts(text)
 
     # Final normalization / safety net pass.
     for pattern, replacement in WORD_REPLACEMENTS.items():
@@ -569,9 +641,6 @@ async def process_message(raw_text):
 # -------------------------------------------------------------------
 # DELIVERY WITH RETRY / FLOOD-WAIT HANDLING
 # -------------------------------------------------------------------
-# The bot must never silently drop a signal because of a transient
-# network error or a Telegram rate limit — retry a few times, and
-# respect FloodWait exactly instead of hammering the API.
 async def send_with_retry(coro_factory, max_retries=3):
     attempt = 0
     while True:
@@ -593,8 +662,6 @@ async def send_with_retry(coro_factory, max_retries=3):
 # -------------------------------------------------------------------
 # DEDUP GUARD
 # -------------------------------------------------------------------
-# Extra safety net against duplicate delivery within a single running
-# instance (e.g. an update redelivered after a reconnect).
 _seen_messages = deque(maxlen=1000)
 _seen_messages_set = set()
 
@@ -606,9 +673,27 @@ def _already_processed(chat_id, message_id):
     _seen_messages.append(key)
     _seen_messages_set.add(key)
     if len(_seen_messages) == _seen_messages.maxlen:
-        # deque auto-evicts oldest; keep the set in sync.
         _seen_messages_set.intersection_update(_seen_messages)
     return False
+
+
+# -------------------------------------------------------------------
+# SOURCE→DESTINATION MESSAGE MAP (for syncing later edits)
+# -------------------------------------------------------------------
+# When the source channel EDITS an already-posted message (e.g.
+# updating "TP3 running" with new pip counts, or fixing a typo),
+# Telegram sends an edit event, not a new message. Without this map
+# there is no way to know which destination message to update, so
+# those edits were silently never reaching the destination channel.
+_MESSAGE_ID_MAP = OrderedDict()
+_MESSAGE_ID_MAP_MAX = 2000
+
+
+def _remember_destination(source_msg_id, destination_chat_id, destination_msg_id):
+    _MESSAGE_ID_MAP[source_msg_id] = (destination_chat_id, destination_msg_id)
+    _MESSAGE_ID_MAP.move_to_end(source_msg_id)
+    if len(_MESSAGE_ID_MAP) > _MESSAGE_ID_MAP_MAX:
+        _MESSAGE_ID_MAP.popitem(last=False)
 
 
 # -------------------------------------------------------------------
@@ -657,7 +742,8 @@ async def command_menu(event):
             "📡 Copiando señales de Gold automáticamente\n"
             "➡️ Destino: BREY TRADING FX VIP\n\n"
             "🇪🇸 Idioma: Español (fijo)\n"
-            "🤖 Traducción: Automática (no bloqueante, en paralelo)\n"
+            "🤖 Traducción: Automática (validada, sin bloqueo)\n"
+            "✏️ Ediciones del canal fuente: Sincronizadas\n"
             "🚫 Mensajes promocionales: Bloqueados\n"
             "📋 Señales: Copiadas limpiamente\n\n"
             "Usa los botones para controlar el bot.",
@@ -696,14 +782,15 @@ async def command_menu(event):
             f"📊 Estado:\n\n"
             f"• Estado: {paused}\n"
             f"• Idioma: Español (fijo)\n"
-            f"• Traducción: ON (async, sin bloqueo)\n"
+            f"• Traducción: ON (validada, sin bloqueo)\n"
             f"• Canal fuente: {SOURCE_CHANNEL}\n"
             f"• Canal destino: {DESTINATION_CHANNEL}\n"
             f"• Reemplazos: "
             f"{len(SETTINGS['custom_replacements'])}\n"
             f"• Palabras bloqueadas: "
             f"{len(SETTINGS['blocked_words'])}\n"
-            f"• Mensajes vistos (dedup): {len(_seen_messages_set)}\n\n"
+            f"• Mensajes vistos (dedup): {len(_seen_messages_set)}\n"
+            f"• Mensajes con ediciones sincronizadas: {len(_MESSAGE_ID_MAP)}\n\n"
             f"✅ Bot funcionando correctamente"
         )
 
@@ -906,11 +993,16 @@ async def album_handler(event):
 
     if media_files:
         try:
-            await send_with_retry(
+            sent = await send_with_retry(
                 lambda: user_client.send_file(
                     destination_id, media_files, caption=caption
                 )
             )
+            if sent and event.messages:
+                first_sent = sent[0] if isinstance(sent, list) else sent
+                _remember_destination(
+                    event.messages[0].id, destination_id, first_sent.id
+                )
             print(f"✅ Album sent → {destination_id}")
         except Exception as e:
             print(f"❌ Album failed after retries: {e}")
@@ -963,7 +1055,6 @@ async def replication_engine(event):
         print("⏭️ Skipped: blocked word")
         return
 
-    # Text-only messages must match signal patterns.
     if not has_media and raw_text:
         if not is_valid_signal(raw_text):
             print(f"⏭️ Skipped: not a valid signal: {raw_text[:50]}")
@@ -976,8 +1067,9 @@ async def replication_engine(event):
         return
 
     try:
+        sent = None
         if is_photo:
-            await send_with_retry(
+            sent = await send_with_retry(
                 lambda: user_client.send_file(
                     destination_id, event.message.media, caption=final_text
                 )
@@ -986,18 +1078,66 @@ async def replication_engine(event):
             if not raw_text:
                 print("⏭️ Skipped: non-photo no text")
                 return
-            await send_with_retry(
+            sent = await send_with_retry(
                 lambda: user_client.send_message(destination_id, final_text)
             )
         else:
             if not final_text:
                 return
-            await send_with_retry(
+            sent = await send_with_retry(
                 lambda: user_client.send_message(destination_id, final_text)
             )
+
+        if sent is not None:
+            _remember_destination(event.message.id, destination_id, sent.id)
+
         print(f"✅ Signal: {source_id} → {destination_id}")
     except Exception as e:
         print(f"❌ Delivery failed after retries: {e}")
+
+
+# -------------------------------------------------------------------
+# EDIT SYNC HANDLER
+# -------------------------------------------------------------------
+# When the source channel edits a message it already posted (very
+# common for "TPx running +N pips" updates), sync that edit onto the
+# matching destination message instead of leaving it stale/incomplete.
+@user_client.on(events.MessageEdited(chats=[SOURCE_CHANNEL]))
+async def edit_sync_handler(event):
+    if SETTINGS["paused"]:
+        return
+
+    source_id = event.chat_id
+    destination_id = CHANNEL_MAP.get(source_id)
+    if not destination_id:
+        return
+
+    mapping = _MESSAGE_ID_MAP.get(event.message.id)
+    if not mapping:
+        print("⏭️ Skipped edit: no matching destination message on record")
+        return
+    dest_chat_id, dest_msg_id = mapping
+
+    if is_noforwards(event.message):
+        return
+
+    raw_text = event.message.message
+    if raw_text and is_promotional(raw_text):
+        return
+    if raw_text and is_blocked_word_found(raw_text):
+        return
+
+    final_text = await process_message(raw_text) if raw_text else None
+    if not final_text:
+        return
+
+    try:
+        await send_with_retry(
+            lambda: user_client.edit_message(dest_chat_id, dest_msg_id, final_text)
+        )
+        print(f"✏️ Edit synced: {source_id} → {destination_id}")
+    except Exception as e:
+        print(f"❌ Edit sync failed after retries: {e}")
 
 
 # -------------------------------------------------------------------
@@ -1063,8 +1203,9 @@ async def main():
 
     print("\n🚀 Brey Trading Signal Bot RUNNING!")
     print("🇪🇸 Output: Spanish (fixed)")
-    print("🤖 Translation: async, parallel, non-blocking + protected terms")
-    print("🔒 Single-instance lock: ACTIVE (prevents duplicate delivery)")
+    print("🤖 Translation: async, throttled, validated (rejects error pages)")
+    print("✏️ Edit sync: ACTIVE")
+    print("🔒 Single-instance lock: ACTIVE")
     print("🔁 Dedup guard: ACTIVE")
     print("♻️ Retry + FloodWait handling: ACTIVE")
     print("🔄 Auto-reconnect: ENABLED (never stops)")
@@ -1082,9 +1223,6 @@ if __name__ == "__main__":
     while True:
         try:
             asyncio.run(main())
-            # main() only returns on a fatal/unrecoverable session
-            # error (already logged above) — don't spin forever in
-            # that case, since it needs a human to fix the session.
             break
         except KeyboardInterrupt:
             break
@@ -1093,3 +1231,4 @@ if __name__ == "__main__":
             print("🔄 Restarting bot in 10 seconds...")
             import time
             time.sleep(10)
+
