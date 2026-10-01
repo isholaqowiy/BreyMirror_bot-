@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import asyncio
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
@@ -13,10 +14,6 @@ from telethon.errors import (
     AuthKeyUnregisteredError,
 )
 from deep_translator import GoogleTranslator
-from deep_translator.exceptions import (
-    NotValidPayload,
-    TranslationNotFound,
-)
 
 # --- ENVIRONMENT CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID"))
@@ -50,19 +47,38 @@ NAMES_TO_REMOVE = [
 SIGNATURE = "\n\n📊 Brey's Signals | @BREYTRADING"
 
 # --- ERROR TEXTS TO STRIP ---
+# (English + Spanish versions, straight and curly apostrophes.
+#  These are also what Google's error page looks like when the
+#  translator gets blocked / rate limited.)
 ERROR_TEXTS_TO_REMOVE = [
     r"Error\s*500\s*\(Server Error\)[^\n]*",
-    r"That'?s an error\.[^\n]*",
-    r"There was an error\.[^\n]*",
-    r"Please try again later\.[^\n]*",
-    r"That'?s all we know\.[^\n]*",
+    r"That['’]?s an error\.?[^\n]*",
+    r"There was an error\.?[^\n]*",
+    r"Please try again later\.?[^\n]*",
+    r"That['’]?s all we know\.?[^\n]*",
     r"Error\s*\d+[^\n]*",
     r"Server Error[^\n]*",
     r"HTTP Error[^\n]*",
     r"Connection Error[^\n]*",
     r"Request Failed[^\n]*",
     r"Timed out[^\n]*",
+    r"Es un error\.[^\n]*",
+    r"Se ha producido un error[^\n]*",
+    r"Ha ocurrido un error[^\n]*",
+    r"Vuelve a intentarlo[^\n]*",
+    r"Eso es todo lo que sabemos[^\n]*",
+    r"Error (del|de) servidor[^\n]*",
 ]
+
+# Used to detect a translator that returned an error page instead of a
+# real translation.
+_ERROR_SIGNATURE_RE = re.compile(
+    r"Error\s*500|\(Server Error\)|That['’]?s an error|"
+    r"There was an error|Please try again later|"
+    r"That['’]?s all we know|Se ha producido un error|"
+    r"Eso es todo lo que sabemos|Vuelve a intentarlo",
+    re.IGNORECASE,
+)
 
 # --- BLOCKED CONTENT ---
 BLOCKED_PHRASES = [
@@ -208,6 +224,9 @@ SETTINGS = {
     "paused": False,
     "custom_replacements": {},
     "blocked_words": [],
+    # Images/screenshots are BLOCKED by default (client request).
+    # Can be switched with /images on | /images off or the menu button.
+    "allow_images": False,
 }
 
 LANGUAGES = {
@@ -222,14 +241,17 @@ LANGUAGES = {
     "🇮🇹 Italian": "it",
 }
 
+# --- TRANSLATION TUNING ---
+TRANSLATE_RETRIES = 4
+TRANSLATE_RETRY_DELAY = 1.5   # seconds, multiplied by attempt number
+TRANSLATE_CHUNK_LIMIT = 4000  # Google limit is 5000 chars per request
+
 print("Starting Brey Trading Signal Bot...")
 
 user_client = TelegramClient(
     StringSession(SESSION_STRING), API_ID, API_HASH
 )
 bot_client = TelegramClient(StringSession(), API_ID, API_HASH)
-
-_translator = GoogleTranslator(source="auto", target="es")
 
 _PROTECT_PATTERNS = [
     r"XAU/?USD",
@@ -240,6 +262,9 @@ _PROTECT_PATTERNS = [
 _PROTECT_RE = re.compile(
     "|".join(_PROTECT_PATTERNS), flags=re.IGNORECASE
 )
+_PLACEHOLDER_RE = re.compile(r"§\s*(\d+)\s*§")
+
+_translate_lock = None
 
 
 # -------------------------------------------------------------------
@@ -326,15 +351,59 @@ def remove_error_texts(text):
     return text
 
 
+def has_error_signature(text):
+    """True if the text looks like a Google/HTTP error page."""
+    if not text:
+        return False
+    return bool(_ERROR_SIGNATURE_RE.search(text))
+
+
 def _has_letters(s):
     return bool(re.search(r"[A-Za-zÀ-ÿ]", s))
 
 
-def translate_line(line):
-    """Translate one line, protecting tickers and numbers."""
-    stripped = line.strip()
-    if not stripped or not _has_letters(stripped):
-        return line
+def _restore_tokens(text, protected):
+    """Put protected tickers/numbers back. Returns (text, all_ok)."""
+    found = set()
+
+    def _restore(match):
+        idx = int(match.group(1))
+        if idx < len(protected):
+            found.add(idx)
+            return protected[idx]
+        return ""
+
+    restored = _PLACEHOLDER_RE.sub(_restore, text)
+    return restored, len(found) == len(protected)
+
+
+def _split_chunks(text, limit=TRANSLATE_CHUNK_LIMIT):
+    """Split text into chunks (on line boundaries) under the limit."""
+    chunks = []
+    current = []
+    size = 0
+    for line in text.split('\n'):
+        add = len(line) + 1
+        if current and size + add > limit:
+            chunks.append('\n'.join(current))
+            current = []
+            size = 0
+        current.append(line)
+        size += add
+    if current:
+        chunks.append('\n'.join(current))
+    return chunks
+
+
+def _translate_chunk_sync(chunk, target):
+    """
+    Translate one chunk (blocking - run in a thread).
+    Protects tickers/numbers, retries on failure, and REJECTS
+    translator error pages. Returns translated text, or None if all
+    attempts failed.
+    """
+    if not chunk.strip():
+        return chunk
 
     protected = []
 
@@ -342,40 +411,86 @@ def translate_line(line):
         protected.append(match.group(0))
         return f"§{len(protected) - 1}§"
 
-    placeholder = _PROTECT_RE.sub(_stash, stripped)
+    placeholder = _PROTECT_RE.sub(_stash, chunk)
 
-    try:
-        translated = _translator.translate(placeholder)
-        if not translated:
-            return line
-    except (NotValidPayload, TranslationNotFound):
-        return line
-    except Exception as e:
-        print(f"⚠️ Line translation failed: {e}")
-        return line
+    # Nothing to translate (only numbers / emojis / symbols)
+    if not _has_letters(placeholder):
+        return chunk
 
-    def _restore(match):
-        idx = int(match.group(1))
-        return (
-            protected[idx]
-            if idx < len(protected)
-            else match.group(0)
-        )
+    source_has_error = has_error_signature(chunk)
 
-    translated = re.sub(r"§(\d+)§", _restore, translated)
-    leading = line[: len(line) - len(line.lstrip())]
-    trailing = line[len(line.rstrip()):]
-    return f"{leading}{translated}{trailing}"
+    for attempt in range(1, TRANSLATE_RETRIES + 1):
+        try:
+            translated = GoogleTranslator(
+                source="auto", target=target
+            ).translate(placeholder)
+
+            if not translated or not translated.strip():
+                raise ValueError("empty translation")
+
+            if has_error_signature(translated) and not source_has_error:
+                raise ValueError("translator returned an error page")
+
+            restored, ok = _restore_tokens(translated, protected)
+            if ok:
+                return restored
+
+            # Placeholders got mangled -> try without protection and
+            # accept only if every ticker/number survived.
+            print("⚠️ Placeholders lost, retrying unprotected")
+            raw = GoogleTranslator(
+                source="auto", target=target
+            ).translate(chunk)
+            if (
+                raw
+                and raw.strip()
+                and (source_has_error or not has_error_signature(raw))
+                and all(
+                    tok.lower() in raw.lower() for tok in protected
+                )
+            ):
+                return raw
+            raise ValueError("tickers/numbers not preserved")
+
+        except Exception as e:
+            print(
+                f"⚠️ Translation attempt {attempt}/"
+                f"{TRANSLATE_RETRIES} failed: {e}"
+            )
+            if attempt < TRANSLATE_RETRIES:
+                time.sleep(TRANSLATE_RETRY_DELAY * attempt)
+
+    return None
 
 
-def translate_to_spanish(text):
+async def translate_text(text):
+    """Translate without blocking the bot's event loop."""
+    global _translate_lock
     if not text or not SETTINGS.get("ai_translate", True):
         return text
-    lines = text.split('\n')
-    return '\n'.join(translate_line(l) for l in lines)
+
+    if _translate_lock is None:
+        _translate_lock = asyncio.Lock()
+
+    target = SETTINGS["target_language"]
+    loop = asyncio.get_running_loop()
+    output = []
+
+    async with _translate_lock:
+        for chunk in _split_chunks(text):
+            result = await loop.run_in_executor(
+                None, _translate_chunk_sync, chunk, target
+            )
+            if result is None:
+                print("⚠️ Translation failed, using original text")
+                output.append(chunk)
+            else:
+                output.append(result)
+
+    return '\n'.join(output)
 
 
-def clean_message(text):
+async def clean_message(text):
     """Remove names/errors → translate → normalize."""
     if not text:
         return text
@@ -402,8 +517,11 @@ def clean_message(text):
             re.escape(old), new, text, flags=re.IGNORECASE
         )
 
-    # Translate to Spanish
-    text = translate_to_spanish(text)
+    # Translate (non-blocking, with retries)
+    text = await translate_text(text)
+
+    # Strip any error text the translator may have produced
+    text = remove_error_texts(text)
 
     # Normalize trading terms after translation
     text = re.sub(
@@ -417,38 +535,40 @@ def clean_message(text):
     )
     text = re.sub(r'\bsl\b', 'SL', text, flags=re.IGNORECASE)
 
-    # English → Spanish trading phrases
-    phrase_map = [
-        (r'\btrail\s+sl\s+to\s+maximize\s+profits?\b',
-         'Mover SL para maximizar ganancias'),
-        (r'\btrail\s+sl\b', 'Mover SL'),
-        (r'\bfirst\s+entry\b', 'primera entrada'),
-        (r'\bsecond\s+entry\b', 'segunda entrada'),
-        (r'\bclose\s+first\s+position\b', 'cerrar primera posición'),
-        (r'\bclose\s+position\b', 'cerrar posición'),
-        (r'\bbreak\s+even\b', 'punto de equilibrio'),
-        (r'\bbreakeven\b', 'punto de equilibrio'),
-        (r'\bsl\s+hit\b', 'SL alcanzado'),
-        (r'\bonto\s+next\s+opportunity\b',
-         'a la siguiente oportunidad'),
-        (r'\bnext\s+opportunity\b', 'siguiente oportunidad'),
-        (r'\bmove\s+sl\b', 'mover SL'),
-        (r'\bsignal\s+ready\b', 'señal lista'),
-        (r'\btake\s*profit\b', 'tomar ganancias'),
-        (r'\bstop\s*loss\b', 'stop loss'),
-        (r'\bmaximize\s+profits?\b', 'maximizar ganancias'),
-        (r'\bentry\b', 'entrada'),
-        (r'\bsecure\b', 'asegurar'),
-        (r'\bsl\s+golpe\b', 'SL alcanzado'),
-        (r'\bFIRST\b', 'PRIMERA'),
-        (r'\bSECOND\b', 'SEGUNDA'),
-        (r'\bSELL\b', 'VENDER'),
-        (r'\bBUY\b', 'COMPRAR'),
-    ]
-    for pattern, replacement in phrase_map:
-        text = re.sub(
-            pattern, replacement, text, flags=re.IGNORECASE
-        )
+    # English → Spanish trading phrases (only when output is Spanish)
+    if SETTINGS["target_language"] == "es":
+        phrase_map = [
+            (r'\btrail\s+sl\s+to\s+maximize\s+profits?\b',
+             'Mover SL para maximizar ganancias'),
+            (r'\btrail\s+sl\b', 'Mover SL'),
+            (r'\bfirst\s+entry\b', 'primera entrada'),
+            (r'\bsecond\s+entry\b', 'segunda entrada'),
+            (r'\bclose\s+first\s+position\b',
+             'cerrar primera posición'),
+            (r'\bclose\s+position\b', 'cerrar posición'),
+            (r'\bbreak\s+even\b', 'punto de equilibrio'),
+            (r'\bbreakeven\b', 'punto de equilibrio'),
+            (r'\bsl\s+hit\b', 'SL alcanzado'),
+            (r'\bonto\s+next\s+opportunity\b',
+             'a la siguiente oportunidad'),
+            (r'\bnext\s+opportunity\b', 'siguiente oportunidad'),
+            (r'\bmove\s+sl\b', 'mover SL'),
+            (r'\bsignal\s+ready\b', 'señal lista'),
+            (r'\btake\s*profit\b', 'tomar ganancias'),
+            (r'\bstop\s*loss\b', 'stop loss'),
+            (r'\bmaximize\s+profits?\b', 'maximizar ganancias'),
+            (r'\bentry\b', 'entrada'),
+            (r'\bsecure\b', 'asegurar'),
+            (r'\bsl\s+golpe\b', 'SL alcanzado'),
+            (r'\bFIRST\b', 'PRIMERA'),
+            (r'\bSECOND\b', 'SEGUNDA'),
+            (r'\bSELL\b', 'VENDER'),
+            (r'\bBUY\b', 'COMPRAR'),
+        ]
+        for pattern, replacement in phrase_map:
+            text = re.sub(
+                pattern, replacement, text, flags=re.IGNORECASE
+            )
 
     # Clean blank lines
     lines = text.split('\n')
@@ -463,11 +583,15 @@ def clean_message(text):
     return text.strip()
 
 
-def process_message(raw_text):
+async def process_message(raw_text):
     if not raw_text:
         return None
-    text = clean_message(raw_text)
+    text = await clean_message(raw_text)
     if not text:
+        return None
+    # Final safety net: never send translator/server error text
+    if has_error_signature(text) and not has_error_signature(raw_text):
+        print("⏭️ Skipped: error text detected after cleaning")
         return None
     return text + SIGNATURE
 
@@ -499,6 +623,9 @@ def get_main_menu_buttons():
     translate_status = (
         "✅ ON" if SETTINGS["ai_translate"] else "🛑 OFF"
     )
+    images_status = (
+        "✅ ON" if SETTINGS["allow_images"] else "🛑 OFF"
+    )
     pause_label = (
         "▶️ Resume" if SETTINGS["paused"] else "⏸ Pause"
     )
@@ -511,6 +638,10 @@ def get_main_menu_buttons():
         [Button.inline(
             f"🌐 Translation: {translate_status}",
             "toggle_translate"
+        )],
+        [Button.inline(
+            f"🖼 Images: {images_status}",
+            "toggle_images"
         )],
         [Button.inline(
             f"🗣 Language: {lang_name}",
@@ -554,7 +685,8 @@ async def command_menu(event):
             "➡️ Destino: BREY TRADING FX VIP\n\n"
             "🇪🇸 Idioma: Español\n"
             "🤖 Traducción: Automática\n"
-            "🚫 Spam y errores: Bloqueados\n\n"
+            "🚫 Spam y errores: Bloqueados\n"
+            "🚫 Imágenes: Bloqueadas\n\n"
             "Usa los botones para controlar el bot.",
             buttons=get_main_menu_buttons()
         )
@@ -576,6 +708,8 @@ async def command_menu(event):
             "➡️ /resume - Reanudar bot\n"
             "➡️ /ai on - Activar traducción\n"
             "➡️ /ai off - Desactivar traducción\n"
+            "➡️ /images on - Permitir imágenes\n"
+            "➡️ /images off - Bloquear imágenes\n"
             "➡️ /language es - Español\n"
             "➡️ /language en - Inglés\n"
             "➡️ /addword vieja:nueva - Reemplazar\n"
@@ -601,6 +735,9 @@ async def command_menu(event):
         translate = (
             "✅ ON" if SETTINGS["ai_translate"] else "🛑 OFF"
         )
+        images = (
+            "✅ ON" if SETTINGS["allow_images"] else "🛑 OFF"
+        )
         lang_name = next(
             (k for k, v in LANGUAGES.items()
              if v == SETTINGS["target_language"]),
@@ -610,6 +747,7 @@ async def command_menu(event):
             f"📊 Estado:\n\n"
             f"• Estado: {paused}\n"
             f"• Traducción: {translate}\n"
+            f"• Imágenes: {images}\n"
             f"• Idioma: {lang_name}\n"
             f"• Canal fuente: {SOURCE_CHANNEL}\n"
             f"• Canal destino: {DESTINATION_CHANNEL}\n"
@@ -646,15 +784,21 @@ async def command_menu(event):
         SETTINGS["ai_translate"] = False
         await event.respond("🛑 Traducción DESACTIVADA.")
 
+    elif command == "/images on":
+        SETTINGS["allow_images"] = True
+        await event.respond("✅ Imágenes PERMITIDAS.")
+
+    elif command == "/images off":
+        SETTINGS["allow_images"] = False
+        await event.respond(
+            "🛑 Imágenes BLOQUEADAS.\n"
+            "Solo se enviará texto de señales."
+        )
+
     elif command.startswith("/language "):
         lang = command.split("/language ")[1].strip()
         if lang in LANGUAGES.values():
             SETTINGS["target_language"] = lang
-            # Update translator target
-            global _translator
-            _translator = GoogleTranslator(
-                source="auto", target=lang
-            )
             lang_name = next(
                 (k for k, v in LANGUAGES.items()
                  if v == lang), lang
@@ -772,6 +916,18 @@ async def button_handler(event):
             buttons=get_main_menu_buttons()
         )
 
+    elif data == "toggle_images":
+        SETTINGS["allow_images"] = not SETTINGS["allow_images"]
+        status = (
+            "✅ ON" if SETTINGS["allow_images"] else "🛑 OFF"
+        )
+        await event.answer(f"Imágenes: {status}")
+        await safe_edit(
+            event,
+            "🎛 Panel de Control:",
+            buttons=get_main_menu_buttons()
+        )
+
     elif data == "change_language":
         await safe_edit(
             event,
@@ -782,10 +938,6 @@ async def button_handler(event):
     elif data.startswith("lang_"):
         lang_code = data.replace("lang_", "")
         SETTINGS["target_language"] = lang_code
-        global _translator
-        _translator = GoogleTranslator(
-            source="auto", target=lang_code
-        )
         lang_name = next(
             (k for k, v in LANGUAGES.items()
              if v == lang_code),
@@ -817,6 +969,9 @@ async def button_handler(event):
         translate = (
             "✅ ON" if SETTINGS["ai_translate"] else "🛑 OFF"
         )
+        images = (
+            "✅ ON" if SETTINGS["allow_images"] else "🛑 OFF"
+        )
         lang_name = next(
             (k for k, v in LANGUAGES.items()
              if v == SETTINGS["target_language"]),
@@ -828,6 +983,7 @@ async def button_handler(event):
             f"📊 Estado:\n\n"
             f"• Estado: {paused}\n"
             f"• Traducción: {translate}\n"
+            f"• Imágenes: {images}\n"
             f"• Idioma: {lang_name}\n"
             f"• Fuente: {SOURCE_CHANNEL}\n"
             f"• Destino: {DESTINATION_CHANNEL}\n\n"
@@ -880,18 +1036,42 @@ async def album_handler(event):
             print("⏭️ Skipped album: audio/video")
             return
 
-    caption = None
+    raw_caption = None
     for msg in event.messages:
         if msg.message:
-            raw = msg.message
-            if is_promotional(raw):
-                print("⏭️ Skipped album: promotional")
-                return
-            if is_blocked_word_found(raw):
-                print("⏭️ Skipped album: blocked word")
-                return
-            caption = process_message(raw)
+            raw_caption = msg.message
             break
+
+    if raw_caption:
+        if is_promotional(raw_caption):
+            print("⏭️ Skipped album: promotional")
+            return
+        if is_blocked_word_found(raw_caption):
+            print("⏭️ Skipped album: blocked word")
+            return
+
+    # --- IMAGES BLOCKED: never send the pictures ---
+    if not SETTINGS["allow_images"]:
+        if raw_caption and is_valid_signal(raw_caption):
+            final_text = await process_message(raw_caption)
+            if final_text:
+                try:
+                    await user_client.send_message(
+                        destination_id, final_text
+                    )
+                    print(
+                        f"✅ Album caption (text only) → "
+                        f"{destination_id}"
+                    )
+                except Exception as e:
+                    print(f"❌ Album text failed: {e}")
+        else:
+            print("⏭️ Skipped album: images blocked")
+        return
+
+    caption = (
+        await process_message(raw_caption) if raw_caption else None
+    )
 
     media_files = [
         msg.media for msg in event.messages
@@ -945,6 +1125,11 @@ async def replication_engine(event):
     if not raw_text and not has_media:
         return
 
+    # --- IMAGES BLOCKED: photo without text is never forwarded ---
+    if is_photo and not SETTINGS["allow_images"] and not raw_text:
+        print("⏭️ Skipped: image blocked")
+        return
+
     if raw_text and is_promotional(raw_text):
         print("⏭️ Skipped: promotional")
         return
@@ -953,7 +1138,10 @@ async def replication_engine(event):
         print("⏭️ Skipped: blocked word")
         return
 
-    if not has_media and raw_text:
+    # Text must look like a real gold signal. Only photos that are
+    # explicitly allowed keep the old behaviour (caption not checked).
+    photo_allowed = is_photo and SETTINGS["allow_images"]
+    if raw_text and not photo_allowed:
         if not is_valid_signal(raw_text):
             print(
                 f"⏭️ Skipped: not valid signal: "
@@ -962,7 +1150,7 @@ async def replication_engine(event):
             return
 
     final_text = (
-        process_message(raw_text) if raw_text else None
+        await process_message(raw_text) if raw_text else None
     )
 
     if raw_text and not final_text:
@@ -970,21 +1158,16 @@ async def replication_engine(event):
         return
 
     try:
-        if is_photo:
+        if photo_allowed:
             await user_client.send_file(
                 destination_id,
                 event.message.media,
                 caption=final_text
             )
-        elif has_media and not is_photo:
-            if not raw_text:
-                print("⏭️ Skipped: non-photo no text")
-                return
-            await user_client.send_message(
-                destination_id, final_text
-            )
         else:
+            # Text only (photos are never sent while blocked)
             if not final_text:
+                print("⏭️ Skipped: non-photo no text")
                 return
             await user_client.send_message(
                 destination_id, final_text
@@ -1062,8 +1245,9 @@ async def main():
 
     print("\n🚀 Brey Trading Signal Bot RUNNING!")
     print("🇪🇸 Output: Spanish")
-    print("🤖 Translation: Google Translate + safety net")
+    print("🤖 Translation: Google Translate + retries + safety net")
     print("🚫 Error texts: REMOVED")
+    print("🚫 Images: BLOCKED (toggle with /images on|off)")
     print("🚫 Promotional: BLOCKED")
     print("🔄 Auto-reconnect: ENABLED")
     print(f"📡 {SOURCE_CHANNEL} → {DESTINATION_CHANNEL}\n")
