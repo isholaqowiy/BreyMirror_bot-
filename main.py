@@ -15,6 +15,11 @@ from telethon.errors import (
 )
 from deep_translator import GoogleTranslator
 
+try:
+    import requests  # installed together with deep_translator
+except ImportError:  # pragma: no cover
+    requests = None
+
 # --- ENVIRONMENT CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
@@ -242,9 +247,26 @@ LANGUAGES = {
 }
 
 # --- TRANSLATION TUNING ---
-TRANSLATE_RETRIES = 4
+# Backends are tried in this order. A message is only sent when one of
+# them returns a COMPLETE translation (no leftover English words).
+TRANSLATION_BACKENDS = ["google", "gtx"]
+BACKEND_RETRIES = {"google": 3, "gtx": 2}
+BACKEND_CHUNK_LIMIT = {"google": 4000, "gtx": 1200}
 TRANSLATE_RETRY_DELAY = 1.5   # seconds, multiplied by attempt number
-TRANSLATE_CHUNK_LIMIT = 4000  # Google limit is 5000 chars per request
+GTX_URL = "https://translate.googleapis.com/translate_a/single"
+
+# English function/chat words that must NOT survive in the Spanish
+# output. Trading terms (SL, TP, XAUUSD, pips, stop loss...) are fine.
+ENGLISH_MARKER_WORDS = {
+    "the", "we", "you", "your", "our", "is", "was", "were", "will",
+    "this", "that", "these", "those", "with", "for", "and", "from",
+    "but", "when", "then", "if", "it", "its", "be", "been", "not",
+    "just", "please", "guys", "here", "there", "what", "where", "how",
+    "why", "of", "to", "in", "on", "at", "price", "coming", "now",
+    "all", "close", "closed", "closing", "set", "position",
+    "positions", "it's", "that's", "let's", "don't", "can't",
+    "won't", "i'm",
+}
 
 print("Starting Brey Trading Signal Bot...")
 
@@ -265,6 +287,72 @@ _PROTECT_RE = re.compile(
 _PLACEHOLDER_RE = re.compile(r"§\s*(\d+)\s*§")
 
 _translate_lock = None
+
+
+class TranslationIncomplete(Exception):
+    """Raised when no backend could fully translate a message."""
+
+
+# English → Spanish trading phrases (applied when output is Spanish)
+PHRASE_MAP = [
+    (r'\btrail\s+sl\s+to\s+maximize\s+profits?\b',
+     'Mover SL para maximizar ganancias'),
+    (r'\btrail\s+sl\b', 'Mover SL'),
+    (r'\bfirst\s+entry\b', 'primera entrada'),
+    (r'\bsecond\s+entry\b', 'segunda entrada'),
+    (r'\bclose\s+first\s+position\b', 'cerrar primera posición'),
+    (r'\bclose\s+position\b', 'cerrar posición'),
+    (r'\bbreak\s+even\b', 'punto de equilibrio'),
+    (r'\bbreakeven\b', 'punto de equilibrio'),
+    (r'\bsl\s+hit\b', 'SL alcanzado'),
+    (r'\bonto\s+next\s+opportunity\b',
+     'a la siguiente oportunidad'),
+    (r'\bnext\s+opportunity\b', 'siguiente oportunidad'),
+    (r'\bmove\s+sl\b', 'mover SL'),
+    (r'\bsignal\s+ready\b', 'señal lista'),
+    (r'\btake\s*profit\b', 'tomar ganancias'),
+    (r'\bstop\s*loss\b', 'stop loss'),
+    (r'\bmaximize\s+profits?\b', 'maximizar ganancias'),
+    (r'\bentry\b', 'entrada'),
+    (r'\bsecure\b', 'asegurar'),
+    (r'\bsl\s+golpe\b', 'SL alcanzado'),
+    (r'\bFIRST\b', 'PRIMERA'),
+    (r'\bSECOND\b', 'SEGUNDA'),
+    (r'\bSELL\b', 'VENDER'),
+    (r'\bBUY\b', 'COMPRAR'),
+]
+
+# Safety net: repairs English words/phrases that a translator left
+# behind. Only used on text that already went through a translator.
+_OFFLINE_PHRASES = [
+    (r'\bwhen\s+(?:the\s+)?price\s+(?:is\s+)?'
+     r'(?:coming|comes?|arrives?|reaches|reach|hits?)\b',
+     'cuando el precio llegue'),
+    (r'\bwhen\s+(?:the\s+)?price\s+(?:is\s+)?(?:back|returns?)\b',
+     'cuando el precio regrese'),
+    (r'\bclose\s+all\s+positions?\b', 'cerrar todas las posiciones'),
+    (r'\bclose\s+(?:the\s+)?first\s+position\b',
+     'cerrar la primera posición'),
+    (r'\bclose\s+(?:the\s+)?positions?\b', 'cerrar la posición'),
+    (r'\bwe\s+close\b', 'cerramos'),
+    (r'\b(sl)\s+to\s+(?:be|break\s*even|punto de equilibrio)\b',
+     r'\1 a punto de equilibrio'),
+    (r'\b(tp\s*\d)\s+hit\b', r'\1 alcanzado'),
+]
+_OFFLINE_WORDS = [
+    (r'\bprice\b', 'precio'),
+    (r'\bnow\b', 'ahora'),
+    (r'\bwhen\b', 'cuando'),
+    (r'\bclosed\b', 'cerrado'),
+    (r'\bclose\b', 'cerrar'),
+    (r'\bpositions\b', 'posiciones'),
+    (r'\bposition\b', 'posición'),
+    (r'\bset\b', 'coloquen'),
+    (r'\bwait\b', 'esperen'),
+    (r'\bprofits\b', 'ganancias'),
+    (r'\bprofit\b', 'ganancia'),
+    (r'\bwe\b', 'nosotros'),
+]
 
 
 # -------------------------------------------------------------------
@@ -362,6 +450,71 @@ def _has_letters(s):
     return bool(re.search(r"[A-Za-zÀ-ÿ]", s))
 
 
+# -------------------------------------------------------------------
+# TRANSLATION ENGINE
+# -------------------------------------------------------------------
+def english_leftovers(text):
+    """English chat words still present in the (Spanish) text."""
+    if not text:
+        return []
+    words = re.findall(r"[A-Za-z'’]+", text.lower())
+    found = set()
+    for w in words:
+        w = w.replace("’", "'")
+        if w in ENGLISH_MARKER_WORDS:
+            found.add(w)
+    return sorted(found)
+
+
+def offline_repair(text):
+    """Fix English words a translator left behind (Spanish output)."""
+    if not text:
+        return text
+    out = []
+    for line in text.split('\n'):
+        original = line
+        for pattern, repl in _OFFLINE_PHRASES:
+            line = re.sub(pattern, repl, line, flags=re.IGNORECASE)
+        for pattern, repl in _OFFLINE_WORDS:
+            line = re.sub(pattern, repl, line, flags=re.IGNORECASE)
+        if line != original:
+            stripped = line.lstrip()
+            if stripped and stripped[0].isalpha() and stripped[0].islower():
+                indent = line[: len(line) - len(stripped)]
+                line = indent + stripped[0].upper() + stripped[1:]
+        out.append(line)
+    return '\n'.join(out)
+
+
+def normalize_trading_terms(text):
+    text = re.sub(
+        r'\bxauusd\b', 'XAUUSD', text, flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r'\bxau/usd\b', 'XAU/USD', text, flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r'\btp(\d)\b', r'TP\1', text, flags=re.IGNORECASE
+    )
+    text = re.sub(r'\bsl\b', 'SL', text, flags=re.IGNORECASE)
+    return text
+
+
+def finalize_translation(text, repair=True):
+    """Strip error text, normalize trading terms, Spanish phrases."""
+    text = remove_error_texts(text)
+    text = normalize_trading_terms(text)
+    if SETTINGS["target_language"] == "es":
+        for pattern, replacement in PHRASE_MAP:
+            text = re.sub(
+                pattern, replacement, text, flags=re.IGNORECASE
+            )
+        if repair:
+            text = offline_repair(text)
+        text = normalize_trading_terms(text)
+    return text
+
+
 def _restore_tokens(text, protected):
     """Put protected tickers/numbers back. Returns (text, all_ok)."""
     found = set()
@@ -377,7 +530,7 @@ def _restore_tokens(text, protected):
     return restored, len(found) == len(protected)
 
 
-def _split_chunks(text, limit=TRANSLATE_CHUNK_LIMIT):
+def _split_chunks(text, limit):
     """Split text into chunks (on line boundaries) under the limit."""
     chunks = []
     current = []
@@ -395,9 +548,43 @@ def _split_chunks(text, limit=TRANSLATE_CHUNK_LIMIT):
     return chunks
 
 
-def _translate_chunk_sync(chunk, target):
+def _gtx_translate(text, target):
+    """Google's JSON translate endpoint (independent of the HTML
+    page that deep_translator scrapes)."""
+    if requests is None:
+        raise RuntimeError("requests not available")
+    resp = requests.get(
+        GTX_URL,
+        params={
+            "client": "gtx",
+            "sl": "auto",
+            "tl": target,
+            "dt": "t",
+            "q": text,
+        },
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return "".join(
+        seg[0] for seg in data[0] if seg and seg[0]
+    )
+
+
+def _call_backend(backend, text, target):
+    if backend == "google":
+        return GoogleTranslator(
+            source="auto", target=target
+        ).translate(text)
+    if backend == "gtx":
+        return _gtx_translate(text, target)
+    raise ValueError(f"unknown backend: {backend}")
+
+
+def _translate_chunk_sync(chunk, target, backend):
     """
-    Translate one chunk (blocking - run in a thread).
+    Translate one chunk with one backend (blocking - run in a thread).
     Protects tickers/numbers, retries on failure, and REJECTS
     translator error pages. Returns translated text, or None if all
     attempts failed.
@@ -418,12 +605,11 @@ def _translate_chunk_sync(chunk, target):
         return chunk
 
     source_has_error = has_error_signature(chunk)
+    retries = BACKEND_RETRIES.get(backend, 2)
 
-    for attempt in range(1, TRANSLATE_RETRIES + 1):
+    for attempt in range(1, retries + 1):
         try:
-            translated = GoogleTranslator(
-                source="auto", target=target
-            ).translate(placeholder)
+            translated = _call_backend(backend, placeholder, target)
 
             if not translated or not translated.strip():
                 raise ValueError("empty translation")
@@ -438,9 +624,7 @@ def _translate_chunk_sync(chunk, target):
             # Placeholders got mangled -> try without protection and
             # accept only if every ticker/number survived.
             print("⚠️ Placeholders lost, retrying unprotected")
-            raw = GoogleTranslator(
-                source="auto", target=target
-            ).translate(chunk)
+            raw = _call_backend(backend, chunk, target)
             if (
                 raw
                 and raw.strip()
@@ -454,40 +638,81 @@ def _translate_chunk_sync(chunk, target):
 
         except Exception as e:
             print(
-                f"⚠️ Translation attempt {attempt}/"
-                f"{TRANSLATE_RETRIES} failed: {e}"
+                f"⚠️ Translation [{backend}] attempt {attempt}/"
+                f"{retries} failed: {e}"
             )
-            if attempt < TRANSLATE_RETRIES:
+            if attempt < retries:
                 time.sleep(TRANSLATE_RETRY_DELAY * attempt)
 
     return None
 
 
-async def translate_text(text):
-    """Translate without blocking the bot's event loop."""
+async def translate_text(text, backend):
+    """Translate with one backend without blocking the event loop.
+    Returns None if any part failed."""
     global _translate_lock
-    if not text or not SETTINGS.get("ai_translate", True):
-        return text
-
     if _translate_lock is None:
         _translate_lock = asyncio.Lock()
 
     target = SETTINGS["target_language"]
+    limit = BACKEND_CHUNK_LIMIT.get(backend, 1200)
     loop = asyncio.get_running_loop()
     output = []
 
     async with _translate_lock:
-        for chunk in _split_chunks(text):
+        for chunk in _split_chunks(text, limit):
             result = await loop.run_in_executor(
-                None, _translate_chunk_sync, chunk, target
+                None, _translate_chunk_sync, chunk, target, backend
             )
             if result is None:
-                print("⚠️ Translation failed, using original text")
-                output.append(chunk)
-            else:
-                output.append(result)
+                return None
+            output.append(result)
 
     return '\n'.join(output)
+
+
+async def translate_verified(text):
+    """
+    Returns a COMPLETE translation or raises TranslationIncomplete.
+    Never returns half-English / half-Spanish text.
+    """
+    if not text:
+        return text
+
+    if not SETTINGS.get("ai_translate", True):
+        return finalize_translation(text, repair=False)
+
+    reasons = []
+    for backend in TRANSLATION_BACKENDS:
+        translated = await translate_text(text, backend)
+        if translated is None:
+            reasons.append(f"{backend}: failed")
+            continue
+
+        final = finalize_translation(translated)
+        leftovers = (
+            english_leftovers(final)
+            if SETTINGS["target_language"] == "es" else []
+        )
+        if not leftovers:
+            return final
+
+        print(
+            f"⚠️ [{backend}] English words left: "
+            f"{', '.join(leftovers)} → trying next backend"
+        )
+        reasons.append(
+            f"{backend}: English left ({', '.join(leftovers)})"
+        )
+
+    raise TranslationIncomplete("; ".join(reasons))
+
+
+async def notify_owner(text):
+    try:
+        await bot_client.send_message(OWNER_ID, text)
+    except Exception as e:
+        print(f"⚠️ Could not notify owner: {e}")
 
 
 async def clean_message(text):
@@ -517,58 +742,9 @@ async def clean_message(text):
             re.escape(old), new, text, flags=re.IGNORECASE
         )
 
-    # Translate (non-blocking, with retries)
-    text = await translate_text(text)
-
-    # Strip any error text the translator may have produced
-    text = remove_error_texts(text)
-
-    # Normalize trading terms after translation
-    text = re.sub(
-        r'\bxauusd\b', 'XAUUSD', text, flags=re.IGNORECASE
-    )
-    text = re.sub(
-        r'\bxau/usd\b', 'XAU/USD', text, flags=re.IGNORECASE
-    )
-    text = re.sub(
-        r'\btp(\d)\b', r'TP\1', text, flags=re.IGNORECASE
-    )
-    text = re.sub(r'\bsl\b', 'SL', text, flags=re.IGNORECASE)
-
-    # English → Spanish trading phrases (only when output is Spanish)
-    if SETTINGS["target_language"] == "es":
-        phrase_map = [
-            (r'\btrail\s+sl\s+to\s+maximize\s+profits?\b',
-             'Mover SL para maximizar ganancias'),
-            (r'\btrail\s+sl\b', 'Mover SL'),
-            (r'\bfirst\s+entry\b', 'primera entrada'),
-            (r'\bsecond\s+entry\b', 'segunda entrada'),
-            (r'\bclose\s+first\s+position\b',
-             'cerrar primera posición'),
-            (r'\bclose\s+position\b', 'cerrar posición'),
-            (r'\bbreak\s+even\b', 'punto de equilibrio'),
-            (r'\bbreakeven\b', 'punto de equilibrio'),
-            (r'\bsl\s+hit\b', 'SL alcanzado'),
-            (r'\bonto\s+next\s+opportunity\b',
-             'a la siguiente oportunidad'),
-            (r'\bnext\s+opportunity\b', 'siguiente oportunidad'),
-            (r'\bmove\s+sl\b', 'mover SL'),
-            (r'\bsignal\s+ready\b', 'señal lista'),
-            (r'\btake\s*profit\b', 'tomar ganancias'),
-            (r'\bstop\s*loss\b', 'stop loss'),
-            (r'\bmaximize\s+profits?\b', 'maximizar ganancias'),
-            (r'\bentry\b', 'entrada'),
-            (r'\bsecure\b', 'asegurar'),
-            (r'\bsl\s+golpe\b', 'SL alcanzado'),
-            (r'\bFIRST\b', 'PRIMERA'),
-            (r'\bSECOND\b', 'SEGUNDA'),
-            (r'\bSELL\b', 'VENDER'),
-            (r'\bBUY\b', 'COMPRAR'),
-        ]
-        for pattern, replacement in phrase_map:
-            text = re.sub(
-                pattern, replacement, text, flags=re.IGNORECASE
-            )
+    # Translate completely (raises TranslationIncomplete on failure),
+    # then strip errors / normalize trading terms / Spanish phrases
+    text = await translate_verified(text)
 
     # Clean blank lines
     lines = text.split('\n')
@@ -586,7 +762,19 @@ async def clean_message(text):
 async def process_message(raw_text):
     if not raw_text:
         return None
-    text = await clean_message(raw_text)
+
+    try:
+        text = await clean_message(raw_text)
+    except TranslationIncomplete as e:
+        print(f"❌ Translation incomplete, message NOT sent: {e}")
+        await notify_owner(
+            "⚠️ Mensaje NO enviado: no se pudo traducir por "
+            "completo.\n\n"
+            f"Original:\n{raw_text[:1500]}\n\n"
+            "Revisa los logs del servidor para ver el motivo."
+        )
+        return None
+
     if not text:
         return None
     # Final safety net: never send translator/server error text
@@ -1065,6 +1253,8 @@ async def album_handler(event):
                     )
                 except Exception as e:
                     print(f"❌ Album text failed: {e}")
+            else:
+                print("⏭️ Skipped album: caption not sent")
         else:
             print("⏭️ Skipped album: images blocked")
         return
@@ -1072,6 +1262,11 @@ async def album_handler(event):
     caption = (
         await process_message(raw_caption) if raw_caption else None
     )
+
+    # Never send a captioned album without its (translated) caption
+    if raw_caption and not caption:
+        print("⏭️ Skipped album: caption not sent")
+        return
 
     media_files = [
         msg.media for msg in event.messages
@@ -1154,7 +1349,7 @@ async def replication_engine(event):
     )
 
     if raw_text and not final_text:
-        print("⏭️ Skipped: empty after cleaning")
+        print("⏭️ Skipped: not sent (empty / not fully translated)")
         return
 
     try:
@@ -1245,7 +1440,7 @@ async def main():
 
     print("\n🚀 Brey Trading Signal Bot RUNNING!")
     print("🇪🇸 Output: Spanish")
-    print("🤖 Translation: Google Translate + retries + safety net")
+    print("🤖 Translation: 2 backends + completeness check")
     print("🚫 Error texts: REMOVED")
     print("🚫 Images: BLOCKED (toggle with /images on|off)")
     print("🚫 Promotional: BLOCKED")
